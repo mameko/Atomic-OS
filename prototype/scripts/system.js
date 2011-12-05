@@ -26,7 +26,7 @@ window.system = {
                     net: new HxNETDevice({
                         name: '/dev/net',
 //                        url: 'http://localhost/cgi-bin/aos-2/netdevice.cgi',
-                        url: 'net-example/netdevice.php',
+                        url: 'http://localhost/net-example/netdevice.php',
                         pollRate: 60000
                     })
                 }

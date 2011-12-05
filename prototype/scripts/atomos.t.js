@@ -191,2872 +191,6 @@ if (typeof window.console == 'undefined') {
     return Class;
   };
 })();
-/*==================================================== -*- C++ -*-
-* tcl.js "A Tcl implementation in Javascript"
-*
-* Patched for Atomic OS use by Scott Elcomb 2011 (<http://psema4.github.com/Atomic-OS/>)
-*
-* Released under the same terms as Tcl itself.
-* (BSD license found at <http://www.tcl.tk/software/tcltk/license.html>)
-*
-* Based on Picol by Salvatore Sanfilippo (<http://antirez.com/page/picol>)
-* (c) Stéphane Arnold 2007
-* Richard Suchenwirth 2007: cleanup, additions
-* vim: syntax=javascript autoindent softtabwidth=4
-*/
-_step = 0 // set to 1 for debugging
-
-function TclInterp () {
-    this.callframe = new Array(new Object());
-    this.level     = 0;
-    this.commands  = new Object();
-    this.procs     = new Array();
-    this.OK  = 0;
-    this.RET = 1;
-    this.BRK = 2;
-    this.CNT = 3;
-
-    this.getVar = function(name) {
-        var nm = name.toString();
-
-        if (nm.match("^::")) {
-            var val = this.callframe[0][nm.substr(2)];
-        } else {
-            var val = this.callframe[this.level][name];
-        }
-
-        if (val == null) throw "No such variable: "+name;
-        return val;
-    }
-
-    this.setVar = function(name, val) {
-        var nm = name.toString();
-
-        if (nm.match("^::")) {
-            this.callframe[0][nm.substr(2)] = val;
-        } else {
-            this.callframe[this.level][name] = val;
-        }
-
-        return val;
-    }
-
-    this.incrLevel = function() {
-        this.callframe[++this.level] = new Object();
-        return this.level;
-    }
-
-    this.decrLevel = function() {
-        this.callframe[this.level] = null;
-        this.level--;
-        if (this.level<0) throw "Exit application";
-        this.result = null;
-    }
-
-    this.getCommand = function(name) {
-        try {
-            return this.commands[name];
-        } catch (e) {throw "No such command '"+name+"'";}
-    }
-
-    this.registerCommand = function(name, func, privdata) {
-        if (func == null) throw "No such function: "+name;
-        this.commands[name] = new TclCommand(func, privdata);
-    }
-
-    this.renameCommand = function (name, newname) {
-        this.commands[newname] = this.commands[name];
-
-        if (this.procs[name]) {
-            this.procs[name] = null;
-            this.procs[newname] = true;
-        }
-
-        this.commands[name] = null;
-    }
-
-    this.registerSubCommand = function(name, subcmd, func, privdata) {
-        if (func == null) throw "No such subcommand: "+ name +" " + subcmd;
-        var path = name.split(" ");
-        var ens;
-        name = path.shift();
-        var cmd = this.commands[name];
-
-        if (cmd == null) {
-            ens = new Object();
-            ens["subcommands"]  = new TclCommand(Tcl.InfoSubcommands, null);
-            this.commands[name] = new TclCommand(Tcl.EnsembleCommand, null, ens);
-        }
-
-        ens = this.commands[name].ensemble;
-        if (ens == null) throw "Not an ensemble command: '"+name+"'";
-
-        // walks deeply into the subcommands tree
-        while (path.length > 0) {
-            name = path.shift();
-            cmd = ens[name];
-
-            if (cmd == null) {
-                cmd = new TclCommand(Tcl.EnsembleCommand, null, new Object());
-                ens[name] = cmd;
-                ens = cmd.ensemble;
-                ens["subcommands"] = new TclCommand(Tcl.InfoSubcommands, null);
-            }
-        }
-
-        ens[subcmd] = new TclCommand(func, privdata);
-    }
-
-    this.eval = function (code) {
-        try {
-            return this.eval2(code);
-        } catch (e) {
-// SGE
-//            if (! confirm(e+"/" + e.description + "\nwhile evaluating "+code.substr(0,128)+"...") ) throw(e);
-            throw(e);
-        }
-    }
-
-    this.eval2 = function(code) {
-        this.code = this.OK;
-        var parser = new TclParser(code);
-        var args = new Array(0);
-        var first = true;
-        var text, prevtype, result;
-        result = "";
-
-        while (true) {
-            prevtype = parser.type;
-            try {
-                parser.getToken();
-            } catch (e) {break;}
-
-            if (parser.type == (parser.EOF)) break;
-
-            text = parser.getText();
-            if (parser.type == (parser.VAR)) {
-                try {
-                    text = this.getVar(text);
-                } catch (e) {throw "No such variable '" + text + "'";}
-
-            } else if (parser.type == (parser.CMD)) {
-                try {
-                    text = this.eval2(text);
-                } catch (e) {throw (e + "\nwhile parsing \"" + text + "\"");}
-
-            } else if (parser.type == (parser.ESC)) {
-                // escape handling missing!
-
-            } else if (parser.type == (parser.SEP)) {
-                prevtype = parser.type;
-                continue;
-            }
-
-            text = this.objectify(text);
-
-            if (parser.type ==parser.EOL || parser.type == parser.EOF) {
-                prevtype = parser.type;
-
-                if (args.length > 0) {
-                    result = this.call(args);
-                    if (this.code != this.OK) return this.objectify(result);
-                }
-
-                args = new Array();
-                continue;
-            }
-
-            if (prevtype == parser.SEP || prevtype == parser.EOL) {
-                args.push(text);
-            } else {
-                args[args.length-1] = args[args.length-1].toString() + text.toString();
-            }
-        }
-
-        if (args.length > 0) result = this.call(args);
-        return this.objectify(result);
-    }
-
-    //---------------------------------- Commands in alphabetical order
-    this.registerCommand("and", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var a = interp.objectify(args[1]).toBoolean();
-        var b = interp.objectify(args[2]).toBoolean();
-        return (a && b);
-    });
-
-    this.registerCommand("append", function (interp, args) {
-        this.requireMinArgc(args, 2);
-        var vname = args[1].toString();
-
-        if (interp.callframe[interp.level][vname] != null) {
-        var str = interp.getVar(vname);
-        } else var str = "";
-
-        for (var i = 2; i < args.length; i++) str += args[i].toString();
-        interp.setVar(vname, str);
-        return str;
-    });
-
-    this.registerCommand("break", function (interp, args) {
-        interp.code = interp.BRK;
-        return;
-    });
-
-    this.registerCommand("continue", function (interp, args) {
-        interp.code = interp.CNT;
-        return;
-    });
-
-    this.registerSubCommand("clock", "format", function (interp, args) {
-        var now = new Date();
-        now.setTime(args[1]);
-        return now.toString();
-    });
-
-    this.registerSubCommand("clock", "scan", function (interp, args) {
-        return Date.parse(args[1]);
-    });
-
-    this.registerSubCommand("clock", "seconds", function (interp, args) {
-        return (new Date()).valueOf();
-    });
-
-    if ( (typeof(jQuery) != 'undefined') || (typeof(Zepto) != 'undefined') ) {
-        console.log('Tcl found jQuery or Zepto during startup, registering dom command');
-        this.registerCommand("dom", function (interp, args) {
-            var selector = args[1].toString();
-            var fn = args[2].toString();
-            args = args.slice(3);
-            for (var i in args) args[i] = args[i].toString();
-            var q = $(selector);
-            q[fn].apply(q,args);
-            return "dom  " + selector;
-        });
-     }
-
-    this.registerCommand("eval",function (interp, args) {
-        this.requireMinArgc(args, 2);
-        for (var i = 1; i < args.length; i++) args[i] = args[i].toString();
-
-        if (args.length == 2) var code = args[1];
-        else                  var code = args.slice(1).join(" ");
-
-        return interp.eval(code);
-    });
-
-    sqrt = Math.sqrt; // "publish" other Math.* functions as needed
-
-    this.registerCommand("expr", function (interp, args) {
-        return eval(args[1].toString());
-    });
-
-    this.registerCommand("for", function (interp, args) {
-        this.requireExactArgc(args, 5);
-        interp.eval(args[1].toString());
-        if(interp.code != interp.OK) return;
-        var cond = "set _ "+args[2].toString();
-        var step = args[3].toString();
-        var body = args[4].toString();
-        interp.inLoop = true;
-        interp.code = interp.OK;
-
-        while (true) {
-            test = interp.objectify(interp.eval(cond));
-            if (!test.toBoolean()) break;
-            interp.eval(body);
-            var ic = interp.code; // tested after step command
-            interp.eval(step);
-            if(ic == interp.BRK) break;
-            if(ic == interp.CNT) continue;
-        }
-
-        interp.inLoop = false;
-
-        if(interp.code == interp.BRK || interp.code == interp.CNT)
-            interp.code=interp.OK;
-        return "";
-    });
-
-    this.registerCommand("foreach", function (interp, args) {
-        this.requireExactArgc(args, 4);
-        var list = args[2].toList();
-        var body = args[3].toString();
-        var res  = "";
-        interp.inLoop = true;
-        interp.code = interp.OK;
-
-        for(i in list) {
-            interp.setVar(args[1],interp.objectify(list[i]));
-            interp.eval(body);
-            if(interp.code == interp.BRK) break;
-            if(interp.code == interp.CNT) continue;
-        }
-
-        interp.inLoop = false;
-
-        if(interp.code == interp.BRK || interp.code == interp.CNT)
-            interp.code=interp.OK;
-        return "";
-     });
-
-    this.registerCommand("gets", function (interp, args) {
-        this.requireArgcRange(args, 2, 3);
-        var reply = prompt(args[1],"");
-
-        if(args[2] != null) {
-            interp.setVar(args[2],interp.objectify(reply));
-            return reply.length;
-        } else return reply;
-    });
-
-    this.registerCommand("if", function (interp, args) {
-        this.requireMinArgc(args, 3);
-        var test = interp.objectify(interp.eval("set _ "+args[1].toString()));
-
-        if (test.toBoolean()) return interp.eval(args[2].toString());
-        if (args.length == 3) return;
-
-        for (var i = 3; i < args.length; ) {
-            switch (args[i].toString()) {
-                case "else":
-                    this.requireExactArgc(args, i + 2);
-                    return interp.eval(args[i+1].toString());
-
-                case "elseif":
-                    this.requireMinArgc(args, i + 3);
-                    test = interp.objectify(interp.eval("set _ "+args[i+1].toString()));
-                    if (test.toBoolean())
-                        return interp.eval(args[i+2].toString());
-                    i += 3;
-                    break;
-
-                default:
-                    throw "Expected 'else' or 'elseif', got "+ args[i];
-            }
-        }
-    });
-
-    this.registerCommand("incr", function (interp, args) {
-        this.requireArgcRange(args, 2, 3);
-        var name = args[1];
-        if (args.length == 2) var incr = 1;
-        else var incr = interp.objectify(args[2]).toInteger();
-        incr += interp.getVar(name).toInteger();
-        return interp.setVar(name, new TclObject(incr, "INTEGER"));
-    });
-
-    this.registerSubCommand("info", "body", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        var name = args[1].toString();
-        if (!interp.procs[name]) throw "Not a procedure: "+name;
-        return interp.getCommand(name).privdata[1];
-    });
-
-    this.registerSubCommand("info", "commands", function (interp, args) {
-        return interp.mkList(interp.commands);
-    });
-
-    this.registerSubCommand("info", "globals", function (interp, args) {
-        return interp.mkList(interp.callframe[0]);
-    });
-
-    this.registerSubCommand("info", "isensemble", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        var name = args[1].toString();
-        return (interp.getCommand(name).ensemble != null);
-    });
-
-    this.registerSubCommand("info", "procs", function (interp, args) {
-        return interp.mkList(interp.procs);
-    });
-
-    this.registerSubCommand("info", "vars", function (interp, args) {
-        return interp.mkList(interp.callframe[interp.level]);
-    });
-
-    this.registerCommand("jseval", function (interp, args) {
-        return eval(args[1].toString());
-    });
-
-    this.registerCommand("lappend", function (interp, args) {
-        this.requireMinArgc(args, 2);
-        var vname = args[1].toString();
-
-        if (interp.callframe[interp.level][vname] != null) {
-            var list = interp.getVar(vname);
-        } else var list = new TclObject([]);
-
-        list.toList();
-
-        for (var i = 2; i < args.length; i++) {
-            list.content.push(interp.objectify(args[i]));
-        }
-
-        interp.setVar(vname, list);
-        return list;
-     });
-
-    this.registerCommand("lindex", function (interp, args) {
-        this.requireMinArgc(args, 3);
-        var list = interp.objectify(args[1]);
-        for (var i = 2; i < args.length; i++) {
-            try {
-                var index = list.listIndex(args[i]);
-            } catch (e) {
-                if (e == "Index out of bounds") return "";
-                throw e;
-            }
-
-            list = list.content[index];
-        }
-        return interp.objectify(list);
-    });
-
-    this.registerCommand("list", function (interp, args) {
-        args.shift();
-        return new TclObject(args);
-    });
-
-    this.registerCommand("llength", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        return args[1].toList().length;
-    });
-
-    this.registerCommand("lrange", function (interp, args) {
-        this.requireExactArgc(args, 4);
-        var list  = interp.objectify(args[1]);
-        var start = list.listIndex(args[2]);
-        var end   = list.listIndex(args[3])+1;
-
-        try {
-            return list.content.slice(start, end);
-        } catch (e) {return new Array();}
-    });
-
-    this.registerCommand("lset", function (interp, args) {
-        this.requireMinArgc(args, 4);
-        var list = interp.getVar(args[1].toString());
-        var elt = list;
-
-        for (var i = 2; i < args.length-2; i++) {
-            elt.toList();
-            elt = interp.objectify(elt.content[elt.listIndex(args[i])]);
-        }
-
-        elt.toList();
-        i = args.length - 2;
-        elt.content[elt.listIndex(args[i])] = interp.objectify(args[i+1]);
-        return list;
-    });
-
-    this.registerCommand("lsort", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        return args[1].toList().sort();
-    });
-
-    this.registerCommand("not", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        return !(interp.objectify(args[1]).toBoolean());
-    });
-
-    this.registerCommand("or", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var a = interp.objectify(args[1]).toBoolean();
-        var b = interp.objectify(args[2]).toBoolean();
-        return (a || b);
-    });
-
-    this.registerCommand("puts", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        // FIXME: Redirection support
-        system.proc.wash.fd[1].write(args[1]);
-    });
-
-    this.registerCommand("proc", function (interp, args) {
-        this.requireExactArgc(args, 4);
-        var name = args[1].toString();
-        var argl = interp.parseList(args[2]);
-        var body = args[3].toString();
-        var priv = new Array(argl,body);
-        interp.commands[name] = new TclCommand(Tcl.Proc, priv);
-        interp.procs[name] = true;
-    });
-
-    this.registerCommand("regexp", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var re = new RegExp(args[1].toString());
-        var str = args[2].toString();
-        return (str.search(re) > -1);
-    });
-
-    this.registerCommand("rename", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        interp.renameCommand(args[1], args[2]);
-    });
-
-    this.registerCommand("return", function (interp, args) {
-        this.requireArgcRange(args, 1, 2);
-        var r = args[1];
-        interp.code = interp.RET;
-        return r;
-    });
-
-    this.registerCommand("set", function (interp, args) {
-        this.requireArgcRange(args, 2, 3);
-        var name = args[1];
-        if (args.length == 3) interp.setVar(name, args[2]);
-        return interp.getVar(name);
-    });
-
-    this.registerCommand("source", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        return Tcl.Source(interp, args[1]);
-    });
-
-    this.registerSubCommand("string", "equal", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        return (args[1].toString() == args[2].toString());
-    });
-
-    this.registerSubCommand("string", "index", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var s = args[1].toString();
-
-        try {
-            return s.charAt(args[1].stringIndex(args[2]));
-        } catch (e) {return "";}
-    });
-
-    this.registerSubCommand("string", "range", function (interp, args) {
-        this.requireExactArgc(args, 4);
-        var s = args[1];
-
-        try {
-            var b = s.stringIndex(args[2].toString());
-            var e = s.stringIndex(args[3].toString());
-            if (b > e) return "";
-            return s.toString().substring(b, e + 1);
-        } catch (e) {return "";}
-    });
-
-    function sec_msec () {
-        var t = new Date();
-        return t.getSeconds()*1000 + t.getMilliseconds();
-    }
-
-    this.registerCommand("time", function (interp, args) {
-        this.requireArgcRange(args, 2, 3);
-        if (args.length == 3) var n = args[2]; else var n = 1;
-        var t0 = sec_msec();
-        for(var i = 0; i < n; i++) interp.eval(args[1].toString());
-        return (sec_msec()-t0)*1000/n + " microseconds per iteration";
-    });
-
-    this.registerCommand("unset", function (interp, args) {
-        this.requireExactArgc(args, 2);
-        interp.setVar(args[1], null);
-    });
-
-    this.registerCommand("while", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var cond = "set _ "+args[1].toString();
-        var body = args[2].toString();
-        var res  = "";
-        interp.inLoop = true;
-        interp.code = interp.OK;
-
-        while (true) {
-            test = interp.objectify(interp.eval(cond));
-            if (!test.toBoolean()) break;
-            res = interp.eval(body);
-            if(interp.code == interp.CNT) continue;
-            if(interp.code != interp.OK)  break;
-        }
-
-        interp.inLoop = false;
-        if(interp.code == interp.BRK || interp.code == interp.CNT)
-            interp.code=interp.OK;
-        return interp.objectify(res);
-    });
-
- // native cmdname {function(interp, args) {...}}
-    this.registerCommand("native", function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var cmd = args[1].toList();
-        var func = eval(args[2].toString());
-        //alert("in: "+args[2].toString()+", func: "+ func);
-
-        if (cmd.length == 1) {
-            interp.registerCommand(cmd[0].toString(), func);
-            return;
-        }
-
-        base = cmd[0].toString();
-        cmd.shift();
-        interp.registerSubCommand(base, cmd.join(" "), eval(args[2].toString()));
-        return;
-    });
-
-    this.math = function (name, a, b) {
-        switch (name) {
-            case "+": return a + b;
-            case "-": return a - b;
-            case "*": return a * b;
-            case "/": return a / b;
-            case "%": return a % b;
-            case "<": return a < b;
-            case ">": return a > b;
-            case "=": case "==": return a == b;
-            case "!=": return a != b;
-            default: throw "Unknown operator: '"+name+"'";
-        }
-    }
-
-    var ops = ["+","-","*","/","%","<",">","=","==","!="];
-
-    for (i in ops) this.registerCommand(ops[i],function (interp, args) {
-        this.requireExactArgc(args, 3);
-        var name = args[0].toString();
-        var a = interp.objectify(args[1]);
-        var b = interp.objectify(args[2]);
-        var x = a.getNumber();
-        var y = b.getNumber();
-
-        if (a.isInteger() && b.isInteger())
-            return new TclObject(interp.math(name, x, y),"INTEGER");
-        if (a.isReal() && b.isReal())
-            return new TclObject(interp.math(name, x, y),"REAL");
-        return new TclObject(interp.math(name, x, y).toString());
-    });
-
-    this.mkList = function(x) {
-        var list = new Array();
-        for (var name in x) {list.push(name);}
-        return list;
-    }
-
-    this.objectify = function (text) {
-        if (text == null) text = "";
-        else if (text instanceof TclObject) return text;
-        return new TclObject(text);
-    }
-
-    this.parseString = function (text) {
-        text = text.toString();
-
-        switch (text.charAt(0)+text.substr(text.length-1)) {
-            case "{}":
-            case "\"\"":
-                text = text.substr(1,text.length-2);
-                break;
-        }
-
-        return this.objectify(text);
-    }
-
-    this.parseList = function (text) {
-        text = text.toString();
-
-        switch (text.charAt(0)+text.substr(text.length-1)) {
-            case "{}":
-            case "\"\"":
-                text = new Array(text);
-                break;
-        }
-
-        return this.objectify(text);
-    }
-
-    this.call = function(args) {
-        if(_step && !confirm("this.call "+args)) throw "user abort";
-        var func = this.getCommand(args[0].toString());
-        var r = func.call(this,args);
-
-        switch (this.code) {
-            case this.OK:
-            case this.RET:
-                return r;
-
-            case this.BRK:
-                if (!this.inLoop) throw "Invoked break outside of a loop";
-                break;
-
-            case this.CNT:
-                if (!this.inLoop) throw "Invoked continue outside of a loop";
-                break;
-
-            default:
-                throw "Unknown return code " + this.code;
-        }
-
-        return r;
-    }
-
-    if(typeof(jQuery) != 'undefined') {
-        this.eval('proc puts s {dom body appendTo \"<div style=\'font-family:Courier\'>$s</div>\";list}');
-    }
-} // END TclInterp()
-
-var Tcl = new Object();
-Tcl.isReal     = new RegExp("^[+\\-]?[0-9]+\\.[0-9]*([eE][+\\-]?[0-9]+)?$");
-Tcl.isDecimal  = new RegExp("^[+\\-]?[1-9][0-9]*$");
-Tcl.isHex      = new RegExp("^0x[0-9a-fA-F]+$");
-Tcl.isOctal    = new RegExp("^[+\\-]?0[0-7]*$");
-Tcl.isHexSeq   = new RegExp("[0-9a-fA-F]*");
-Tcl.isOctalSeq = new RegExp("[0-7]*");
-Tcl.isList     = new RegExp("[\\{\\} ]");
-Tcl.isNested   = new RegExp("^\\{.*\\}$");
-Tcl.getVar     = new RegExp("^[a-zA-Z0-9_]+", "g");
-
-Tcl.Source = function (interp, url) {
-    var xhr_object = null;
-    if(window.ActiveXObject)        // Internet Explorer
-        xhr_object = new ActiveXObject("Microsoft.XMLHTTP");
-
-    else if(window.XMLHttpRequest)  // Firefox
-        xhr_object = new XMLHttpRequest();
-
-    else {                          // XMLHttpRequest non supporté par le navigateur
-        alert("Your browser does not support XMLHTTP requests. " +
-              "Sorry that we cannot deliver this page.");
-        return;
-    }
-
-    xhr_object.open("GET", url, false);
-    xhr_object.send(null);
-    return interp.eval(xhr_object.responseText);
-}
-
-Tcl.Proc = function (interp, args) {
-    var priv = this.privdata;
-    interp.incrLevel();
-    var arglist = priv[0].toList();
-    var body    = priv[1];
-    args.shift();
-    for (var i = 0; i < arglist.length; i++) {
-        var name = arglist[i].toString();
-        if (i >= args.length) {
-            if (name == "args") {
-                interp.setVar("args", Tcl.empty);
-                break;
-            }
-        }
-
-        if (Tcl.isList.test(name)) {
-            name = interp.parseString(name).toList();
-            if (name[0] == "args") throw "'args' defaults to the empty string";
-            if (i >= args.length)
-                interp.setVar(name.shift(), interp.parseString(name.join(" ")));
-            else interp.setVar(name[0], interp.objectify(args[i]));
-
-        } else if (name == "args") {
-            interp.setVar("args", new TclObject(args.slice(i, args.length)));
-            break;
-        }
-
-        interp.setVar(name, interp.objectify(args[i]));
-    }
-
-    if (name == "args" && i+1 < arglist.length)
-        throw "'args' should be the last argument";
-
-    try {
-        var r = interp.eval(body);
-        interp.code = interp.OK;
-        interp.decrLevel();
-        return r;
-
-    } catch (e) {
-        interp.decrLevel();
-        throw "Tcl.Proc exception "+e;
-    }
-}
-
-/** Manage subcommands */
-Tcl.EnsembleCommand = function (interp, args) {
-    var sub  = args[1].toString();
-    var main = args.shift().toString()+sub;
-    args[0] = main;
-    var ens = this.ensemble;
-
-    if (ens == null || ens[sub] == null) {
-        throw "Not an ensemble command: "+main;
-    }
-
-    return ens[sub].call(interp, args);
-}
-
-/** Get subcommands of the current ensemble command. */
-Tcl.InfoSubcommands = function(interp, args) {
-    var r = new Array();
-    for (var i in this.ensemble) r.push(i);
-    return interp.objectify(r);
-}
-
-function TclObject(text) {
-    this.TEXT    = 0;
-    this.LIST    = 1;
-    this.INTEGER = 2;
-    this.REAL    = 3;
-    this.BOOL    = 4;
-
-    switch (arguments[0]) {
-        case "LIST":
-        case "INTEGER":
-        case "REAL":
-        case "BOOL":
-            this.type = this[arguments[0]];
-            break;
-
-        default:
-            this.type = this.TEXT;
-            if (text instanceof Array) this.type = this.LIST;
-            else text = text.toString();
-            break;
-    }
-
-    this.content = text;
-
-    this.stringIndex = function (i) {
-        this.toString();
-        return this.index(i, this.content.length);
-    }
-
-    this.listIndex = function (i) {
-        this.toList();
-        return this.index(i, this.content.length);
-    }
-
-    this.index = function (i, len) {
-        var index = i.toString();
-        if (index.substring(0,4) == "end-")
-            index = len - parseInt(index.substring(4)) - 1;
-
-        else if (index == "end") index = len-1;
-
-        else index = parseInt(index);
-
-        if (isNaN(index)) throw "Bad index "+i;
-        if (index < 0 || index >= len) throw "Index out of bounds";
-
-        return index;
-    }
-
-    this.isInteger = function () {return (this.type == this.INTEGER);}
-
-    this.isReal    = function () {return (this.type == this.REAL);}
-
-    this.getString = function (list, nested) {
-        var res = new Array();
-        for (var i in list) {
-            res[i] = list[i].toString();
-            if (Tcl.isList.test(res[i]) && !Tcl.isNested.test(res[i]))
-                res[i] = "{" + res[i] + "}";
-        }
-
-        if (res.length == 1) return res[0];
-        return res.join(" ");
-    }
-
-    this.toString = function () {
-        if (this.type != this.TEXT) {
-            if (this.type == this.LIST)
-                this.content = this.getString(this.content);
-            else this.content = this.content.toString();
-            this.type = this.TEXT;
-        }
-
-        return this.content;
-    }
-
-    this.getList = function (text) {
-        if (text.charAt(0) == "{" && text.charAt(text.length-1) == "}")
-            text = text.substring(1, text.length-1);
-        if (text == "") return [];
-        var parser = new TclParser(text.toString());
-        var content = new Array();
-
-        for (var i = 0; ; i++) {
-            parser.parseList();
-            content[i] = new TclObject(parser.getText());
-
-            if (parser.type == parser.EOL || parser.type == parser.ESC)
-                break;
-        }
-
-        return content;
-    }
-
-    this.toList = function () {
-        if (this.type != this.LIST) {
-            if (this.type != this.TEXT) this.content[0] = this.content;
-            else this.content = this.getList(this.content);
-            this.type = this.LIST;
-        }
-
-        return this.content;
-    }
-
-    this.toInteger = function () {
-        if (this.type == this.INTEGER) return this.content;
-        this.toString();
-
-        if (this.content.match(Tcl.isHex))
-            this.content = parseInt(this.content.substring(2), 16);
-
-        else if (this.content.match(Tcl.isOctal))
-            this.content = parseInt(this.content, 8);
-
-        else if (this.content.match(Tcl.isDecimal))
-            this.content = parseInt(this.content);
-
-        else throw "Not an integer: '"+this.content+"'";
-
-        if (isNaN(this.content)) throw "Not an integer: '"+this.content+"'";
-
-        this.type = this.INTEGER;
-        return this.content;
-    }
-
-    this.getFloat = function (text) {
-        if (!text.toString().match(Tcl.isReal))
-        throw "Not a real: '"+text+"'";
-        return parseFloat(text);
-    }
-
-    this.toReal = function () {
-        if (this.type == this.REAL)
-            return this.content;
-
-        this.toString();
-
-        // parseFloat doesn't control all the string, so need to check it
-        this.content = this.getFloat(this.content);
-        if (isNaN(this.content)) throw "Not a real: '"+this.content+"'";
-        this.type = this.REAL;
-        return this.content;
-    }
-
-    this.getNumber = function () {
-        try {
-            return this.toInteger();
-        } catch (e) {return this.toReal();}
-    }
-
-    this.toBoolean = function () {
-        if (this.type == this.BOOL) return this.content;
-
-        try {
-            this.content = (this.toInteger() != 0);
-        } catch (e) {
-            var t = this.content;
-            if (t instanceof Boolean) return t;
-
-            switch (t.toString().toLowerCase()) {
-                case "yes":
-                case "true":
-                case "on":
-                    this.content = true;
-                    break;
-
-                case "false":
-                case "off":
-                case "no":
-                    this.content = false;
-                    break;
-
-                default:
-                    throw "Boolean expected, got: '"+this.content+"'";
-                }
-        }
-
-        this.type = this.BOOL;
-        return this.content;
-    }
-} // END TclObject()
-
-function TclCommand(func, privdata) {
-    if (func == null) throw "No such function";
-    this.func = func;
-    this.privdata = privdata;
-    this.ensemble = arguments[2];
-
-    this.call = function(interp, args) {
-        var r = (this.func)(interp, args);
-        r = interp.objectify(r);
-        if (r != null) interp.setVar("_", r);
-        return r;
-    }
-
-    this.requireExactArgc = function (args, argc) {
-        if (args.length != argc) {
-            throw argc+" arguments expected, got "+args.length;
-        }
-    }
-
-    this.requireMinArgc = function (args, argc) {
-        if (args.length < argc) {
-            throw argc+" arguments expected at least, got "+args.length;
-        }
-    }
-
-    this.requireArgcRange = function (args, min, max) {
-        if (args.length < min || args.length > max) {
-            throw min+" to "+max+" arguments expected, got "+args.length;
-        }
-    }
-} // END TclCommand()
-
-function TclParser(text) {
-    this.OK  = 0;
-    this.SEP = 0;
-    this.STR = 1;
-    this.EOL = 2;
-    this.EOF = 3;
-    this.ESC = 4;
-    this.CMD = 5;
-    this.VAR = 6;
-    this.text  = text;
-    this.start = 0;
-    this.end   = 0;
-    this.insidequote = false;
-    this.index = 0;
-    this.len = text.length;
-    this.type = this.EOL;
-    this.cur = this.text.charAt(0);
-
-    this.getText = function () {
-        return this.text.substring(this.start,this.end+1);
-    }
-
-    this.parseString = function () {
-        var newword = (this.type==this.SEP || this.type == this.EOL || this.type == this.STR);
-        if (newword && this.cur == "{") return this.parseBrace();
-        else if (newword && this.cur == '"') {
-            this.insidequote = true;
-            this.feedchar();
-        }
-
-        this.start = this.index;
-
-        while (true) {
-            if (this.len == 0) {
-                this.end = this.index-1;
-                this.type = this.ESC;
-                return this.OK;
-            }
-
-            if (this.cur == "\\") {
-                if (this.len >= 2) this.feedSequence();
-
-            } else if ("$[ \t\n\r;".indexOf(this.cur)>=0) {
-                if ("$[".indexOf(this.cur)>=0 || !this.insidequote) {
-                    this.end = this.index-1;
-                    this.type = this.ESC;
-                    return this.OK;
-                }
-
-            } else if (this.cur == '"' && this.insidequote) {
-                this.end  = this.index-1;
-                this.type = this.ESC;
-                this.feedchar();
-                this.insidequote = false;
-                return this.OK;
-            }
-
-            this.feedchar();
-        }
-
-        return this.OK;
-    }
-
-    this.parseList = function () {
-        level = 0;
-        this.start = this.index;
-
-        while (true) {
-            if (this.len == 0) {
-                this.end = this.index;
-                this.type = this.EOL;
-                return;
-            }
-
-            switch (this.cur) {
-                case "\\":
-                    if (this.len >= 2) this.feedSequence();
-                    break;
-
-                case " ":
-                case "\t":
-                case "\n":
-                case "\r":
-                    if (level > 0) break;
-                    this.end  = this.index - 1;
-                    this.type = this.SEP;
-                    this.feedchar();
-                    return;
-
-                case '{':
-                    level++;
-                    break;
-
-                case '}':
-                    level--;
-                    break;
-            }
-
-            this.feedchar();
-        }
-
-        if (level != 0) throw "Not a list";
-        this.end = this.index;
-        return;
-    }
-
-    this.parseSep = function () {
-        this.start = this.index;
-        while (" \t\r\n".indexOf(this.cur)>=0) this.feedchar();
-        this.end  = this.index - 1;
-        this.type = this.SEP;
-        return this.OK;
-    }
-
-    this.parseEol = function () {
-        this.start = this.index;
-        while(" \t\n\r;".indexOf(this.cur)>=0) this.feedchar();
-        this.end  = this.index - 1;
-        this.type = this.EOL;
-        return this.OK;
-    }
-
-    this.parseCommand = function () {
-        var level = 1;
-        var blevel = 0;
-        this.feedcharstart();
-
-        while (true) {
-            if (this.len == 0) break;
-            if (this.cur == "[" && blevel == 0)
-                level++;
-            else if (this.cur == "]" && blevel == 0) {
-                level--;
-                if (level == 0) break;
-
-            } else if (this.cur == "\\") {
-                this.feedSequence();
-
-            } else if (this.cur == "{") {
-                blevel++;
-
-            } else if (this.cur == "}") {
-                if (blevel != 0) blevel--;
-            }
-
-            this.feedchar();
-        }
-
-        this.end  = this.index-1;
-        this.type = this.CMD;
-        if (this.cur == "]")
-            this.feedchar();
-        return this.OK;
-    }
-
-    this.parseVar = function () {
-        this.feedcharstart();
-        this.end = this.index + this.text.substring(this.index).match(Tcl.getVar).toString().length-1;
-
-        if (this.end == this.index-1) {
-            this.end = --this.index;
-            this.type = this.STR;
-        } else this.type = this.VAR;
-
-        this.setPos(this.end+1);
-        return this.OK;
-    }
-
-    this.parseBrace = function () {
-        var level = 1;
-        this.feedcharstart();
-
-        while (true) {
-            if (this.len > 1 && this.cur == "\\") {
-                this.feedSequence();
-
-            } else if (this.len == 0 || this.cur == "}") {
-                level--;
-
-                if (level == 0 || this.len == 0) {
-                    this.end = this.index-1;
-                    if (this.len > 0) this.feedchar();
-                    this.type = this.STR;
-                    return this.OK;
-                }
-
-            } else if (this.cur == "{") level++;
-                 this.feedchar();
-        }
-
-        return this.OK; // unreached
-    }
-
-    this.parseComment = function () {
-        while (this.cur != "\n" && this.cur != "\r") this.feedchar();
-    }
-
-    this.getToken = function () {
-        while (true) {
-            if (this.len == 0) {
-                if (this.type == this.EOL) this.type = this.EOF;
-                if (this.type != this.EOF) this.type = this.EOL;
-                return this.OK;
-            }
-
-            switch (this.cur) {
-                case ' ':
-                case '\t':
-                    if (this.insidequote) return this.parseString();
-                    return this.parseSep();
-
-                case '\n':
-                case '\r':
-                case ';':
-                    if (this.insidequote) return this.parseString();
-                    return this.parseEol();
-
-                case '[':
-                    return this.parseCommand();
-
-                case '$':
-                    return this.parseVar();
-            }
-
-            if (this.cur == "#" && this.type == this.EOL) {
-                this.parseComment();
-                continue;
-            }
-
-            return this.parseString();
-        }
-
-        return this.OK; // unreached
-    }
-
-    this.feedSequence = function () {
-        if (this.cur != "\\") throw "Invalid escape sequence";
-        var cur = this.steal(1);
-        var specials = new Object();
-        specials.a = "\a";
-        specials.b = "\b";
-        specials.f = "\f";
-        specials.n = "\n";
-        specials.r = "\r";
-        specials.t = "\t";
-        specials.v = "\v";
-
-        switch (cur) {
-            case 'u':
-                var hex = this.steal(4);
-                if (hex != Tcl.isHexSeq.exec(hex))
-                    throw "Invalid unicode escape sequence: "+hex;
-                cur = String.fromCharCode(parseInt(hex,16));
-                break;
-
-            case 'x':
-                var hex = this.steal(2);
-                if (hex != Tcl.isHexSeq.exec(hex))
-                    throw "Invalid unicode escape sequence: "+hex;
-                cur = String.fromCharCode(parseInt(hex,16));
-                break;
-
-            case "a":
-            case "b":
-            case "f":
-            case "n":
-            case "r":
-            case "t":
-            case "v":
-                cur = specials[cur];
-                break;
-
-            default:
-                if ("0123456789".indexOf(cur) >= 0) {
-                    cur = cur + this.steal(2);
-                    if (cur != Tcl.isOctalSeq.exec(cur))
-                        throw "Invalid octal escape sequence: "+cur;
-                    cur = String.fromCharCode(parseInt(cur, 8));
-                }
-
-                break;
-        }
-
-        this.text[index] = cur;
-        this.feedchar();
-    }
-
-    this.steal = function (n) {
-        var tail = this.text.substring(this.index+1);
-        var word = tail.substr(0, n);
-        this.text = this.text.substring(0, this.index-1) + tail.substring(n);
-        return word;
-    }
-
-    this.feedcharstart = function () {
-        this.feedchar();
-        this.start = this.index;
-    }
-
-    this.setPos = function (index) {
-        var d = index-this.index;
-        this.index = index;
-        this.len -= d;
-        this.cur = this.text.charAt(this.index);
-    }
-
-    this.feedchar = function () {
-        this.index++;
-        this.len--;
-        if (this.len < 0) throw "End of file reached";
-        this.cur = this.text.charAt(this.index);
-    }
-} //END TclParser()
-/* class.js
- *
- * ++[black[Atomic OS Class: HxClass]++
- *
- * Base class for Atomic OS objects
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxClass = Class.extend({
-    /* @constructor
-     * @method init
-     * @param {Object} opts Options dictionary
-     *
-     */
-    init: function(opts) {
-        opts = opts || {};
-    }
-});
-
-/* guid.js
- *
- * ++[black[Atomic OS Class: HxGUID] **Singleton**++
- *
- * Simple GUID generator based on http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-// FIXME: no validation
-window.HxGUID = (function() {
-    var S4 = function() {
-        return (((1+Math.random())*0x10000)|0).toString(16).substring(1);
-    };
-
-    return {
-        /* @method next
-         * Generates a GUID. **WARNING:** Does not check if ID already in use
-         * @returns {String} GUID
-         */
-
-        next: function() {
-            return (S4()+S4()+"-"+S4()+"-"+S4()+"-"+S4()+"-"+S4()+S4()+S4());
-        }
-    }
-})();
-/* bus.js
- *
- * ++[black[Atomic OS Class: HxBus] **Singleton**++
- *
- * Primary message bus
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxBus = (function () {
-    var channels = {
-        "default": {
-            subscriptions: {}
-        }
-    };
-
-    return {
-        /* @method publish
-         * Publish a message and execute all subscribed callback functions
-         * @param {String} msg Message being published
-         * @param {Array} args Arguments to pass to subscribed callbacks
-         * @param {Object} scope Context to execute callback with
-         * @param {String} ch Optional channel name !!default: 'default'!!
-         */
-
-        publish: function (msg, args, scope, ch) {
-            ch = (ch) ? ch : "default";
-
-            if (! channels.hasOwnProperty(ch)) {
-                console.warn('system bus: publish: "' + ch + '" is not a registered channel');
-                return;
-            }
-
-            if (! channels[ch].subscriptions.hasOwnProperty(msg)) {
-                console.warn('system bus: publish: "' + msg + '" is not a registered message');
-                return;
-            }
-
-            args = (args) ? args : [];
-
-            for (var i=0; i < channels[ch].subscriptions[msg].length; i++) {
-                if (scope) {
-                    channels[ch].subscriptions[msg][i].call(scope, args);
-                } else {
-                    channels[ch].subscriptions[msg][i](args);
-                }
-            }
-        },
-
-        /* @method subscribe
-         * Add a subscription
-         * @param {String} msg Message to subscribe to
-         * @param {Function} fn Function to callback when message is published
-         * @param {String} ch Optional channel name !!default: 'default'!!
-         */
-
-        subscribe: function (msg, fn, ch) {
-            if (typeof fn !== 'function') {
-                throw new Error('system bus: subscribe: fn must be a function');
-            }
-
-            ch = (ch) ? ch : "default";
-
-            if (! channels.hasOwnProperty(ch)) {
-                channels[ch] = {
-                    subscriptions: {}
-                };
-            };
-
-            if (! channels[ch].subscriptions[msg]) {
-                channels[ch].subscriptions[msg] = new Array();
-            }
-
-            channels[ch].subscriptions[msg].push(fn);
-        },
-
-        /* @method unsubscribe
-         * Remove a subscription
-         * @param {String} msg Subscribed message name
-         * @param {Function} fn The callback that was subscribed
-         * @param {String} ch Optional channel name !!default: 'default'!!
-         */
-
-        unsubscribe: function (msg, fn, ch) {
-            if (typeof fn !== 'function') {
-                throw new Error('system bus: unsubscribe: fn must be a function');
-            }
-
-            ch = (ch) ? ch : "default";
-
-            for (var i=0; i < channels[ch].subscriptions[msg].length; i++) {
-                if (channels[ch].subscriptions[msg][i] === fn) {
-                    channels[ch].subscriptions[msg].splice(i, 1);
-                    return;
-                }
-            }
-        }
-    }
-})();
-/* stream.js
- *
- * ++[black[Atomic OS Class: HxStream]++
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxStream = HxClass.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="class.html">HxClass</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        opts = opts                          || {};
-        this.name = opts.name                || HxGUID.next();
-        this.bus = opts.bus                  || HxBus;
-        this.buffer = opts.buffer            || '';
-        this.autoFlush = 'autoFlush' in opts ? opts.autoFlush : true;
-
-        var self = this;
-        this.bus.subscribe('rollcall', function() {
-            console.log('stream "' + self.name + '" responding');
-        });
-    },
-
-    /* @method read
-     * Read and return the internal buffer.  If this stream objects' autoFlush property is set to true, internal buffer will be flushed once read.
-     * @returns {String} Internal buffer
-     */
-
-    read: function() {
-        var buf = this.buffer;
-        if (this.autoFlush) this.flush();
-        return buf;
-    },
-
-    /* @method write
-     * Write characters to internal buffer, overwriting any previous contents
-     * @param {String} buf Text contents to store in internal buffer
-     * @returns {HxStream} Returns this stream object
-     */
-
-    write: function(buf) {
-        this.buffer = buf;
-        this.bus.publish(this.name + ':ondata', this.buffer.length);
-        return this;
-    },
-
-    /* @method append
-     * Write characters to internal buffer, appending to any previous contents
-     * @param {String} buf Text contents to append to internal buffer
-     * @returns {HxStream} Returns this stream object
-     */
-
-    append: function(buf) {
-        this.buffer += buf;
-        this.bus.publish(this.name + ':ondata', this.buffer.length);
-        return this;
-    },
-
-    /* @method flush
-     * Empties the internal buffer
-     */
-
-    flush: function() {
-        this.buffer = '';
-    }
-});
-/* file.js
- *
- * ++[black[Atomic OS Class: HxFile]++
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxFile = HxStream.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="stream.html">HxStream</a>
-     *
-     * By default, autoFlush is false for a file. Otherwise the contents would be lost after reading.
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this._super(opts);
-        this.autoFlush = false;
-    }
-});
-/* device.js
- *
- * ++[black[Atomic OS Class: HxDevice]++
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxDevice = HxStream.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="stream.html">HxStream</a>
-     *
-     * Represents an input and/or output device in an Atomic OS system
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this._super(opts);
-    }
-});
-/* remotefile.js
- *
- * ++[black[Atomic OS Class: HxRemoteFile]++
- */
-
-var HxRemoteFile = HxFile.extend({
-    init: function(opts) {
-        this._super(opts);
-        this.dev = system.fs.tree.dev.tree.net;
-
-        this.read();
-
-        // if the buffer is empty after reading from the server then the file likely doesn't exist.  create it on the server
-        if (this.buffer == '') {
-            this.dev.send(
-                {
-                    cmd:    'file',
-                    subcmd: 'create',
-                    path:   this.name
-                },
-
-                function(response) {
-                    //FIXME: parsing the response is causing an unexpected token 'u' ??
-                    //       it doesn't prevent creation so ignoring for now
-
-                    //console.warn('>>' + response + '<<');
-                    try {
-                        var r = JSON.parse(r);
-                        console.log('HxRemoteFile.init: remote file creation response:');
-                        console.dir(r);
- 
-                    } catch(e) {
-                        // console.log('HxRemoteFile.init: remote file creation: ERROR PARSING RESPONSE:');
-                        // console.dir(e);
-                    }
-                }
-            );
-        }
-    },
-
-    read: function() {
-        path = this.name;
-        var self = this;
-
-        fileAction = {
-            cmd:    'file',
-            subcmd: 'read',
-            path:   path
-        };
-
-        this.dev.send(fileAction, function(response) {
-            var r = JSON.parse(response);
-
-            // fill buffer
-            self.buffer = r.data;
-        });
-
-        return this.buffer || false;
-    },
-
-    write: function(buf) {
-        this.buffer = buf;
-
-        var path = this.name;
-
-        fileAction = {
-            cmd:    'file',
-            subcmd: 'write',
-            path:   path,
-            buffer: buf
-        };
-       
-        this.dev.send(fileAction, function(response) {
-            var r = JSON.parse(response);
-            console.dir(r);
-        });
-
-        return this;
-    },
-   
-    append: function(buf) {
-        this.buffer += buf;
-
-        var path = this.name;
-       
-        fileAction = {
-            cmd:    'file',
-            subcmd: 'append',
-            path:   path,
-            buffer: buf
-        };
-       
-        this.dev.send(fileAction, function(response) {
-            var r = JSON.parse(response);
-            console.dir(r);
-        });
-
-        return this;
-    }
-});
-
-/* jsfs.js
- *
- * ++[black[Atomic OS Class: HxJSFS]++
- *
- * Tree structure to contain a temporary file system in JavaScript
- *
- * Derived from https://gist.github.com/897565
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-
-var HxJSFS = HxStream.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="stream.html">HxStream</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this.tree = opts.tree || {};
-        this._super(opts);
-    },
-
-    /* @method traverse
-     * Crawls a tree, executing a callback on each node found
-     * @param {Object} obj Object to crawl
-     * @param {Function} fn Function to call on each node
-     * @param {Object} parent Parent node
-     */
-
-    traverse: function(obj, fn, parent) {
-        for (i in obj) {
-            if (typeof(obj[i]) != 'function') fn.apply(this, [i, obj[i], parent]);
-
-            if (obj[i] instanceof HxJSFS) {
-                this.traverse(obj[i].tree, fn, i);
-            }
-        }
-    },
-
-    /* @method getNodeRecursive
-     * Search tree for the specified property name
-     * @param {String} property Property to search for
-     * @returns {Array} a list of objects, containing the matched node and it's parent
-     */
-
-    getNodeRecursive: function(property) {
-        var acc = [];
-
-        this.traverse(this.tree, function(key, value, parent) {
-            if (key === property) {
-                acc.push({ parent: parent, value: value });
-            }
-        });
-
-        return acc;
-    },
-
-    /* @method getPath
-     * Get the file path representation to a subnode
-     * @param {String} nodeName Name of the node to search for (eg. an <a href="file.html">HxFile</a>'s name)
-     * @returns {String} the file path to a subnode
-     */
-
-    getPath: function(nodeName) {
-        var path = '/' + nodeName;
-
-        var matches = this.getNodeRecursive(nodeName);
-
-        if (matches.length > 0) {
-            var parentNode = matches[0].parent;
-            if (parentNode) path = this.getPath(parentNode) + path;
-        }
-
-        return path;
-    },
-
-    /* @method find
-     * Locate a file in this file system
-     * @param {String} nodeName Name of the node to locate
-     * @returns {Array} a list of file paths containing the passed node name
-     */
-
-    find: function(nodeName) {
-        var acc = [];
-        var matches = this.getNodeRecursive(nodeName);
-
-        for (var m in matches) {
-            var parentNode = matches[m].parent;
-            var path = this.getPath(parentNode) + '/' + nodeName;
-            acc.push({ path: path, file: matches[m].value });
-        }
-
-        return acc;
-    },
-
-    /* @method basename
-     * @param {String} path File path to process
-     * @returns {String} the filename (endpoint of the file path)
-     */
-
-    basename: function(path) {
-        return (path.match(/\//)) ? path.split('/').pop() : path;
-    },
-
-    /* @method listFiles
-     * List all files and folders that are immediate children of this node
-     * @returns {Array} a sorted list of files and subtrees
-     */
-
-    listFiles: function() {
-        var acc = [];
-
-        for (var child in this.tree) {
-            var node = this.tree[child];
-            acc.push({ path: child, file: node });
-        }
-
-        return acc.sort(function(a, b) {
-            var path1 = a.path.toLowerCase(),
-                path2 = b.path.toLowerCase();
-
-            if (path1 < path2) return -1;
-            if (path1 > path2) return 1;
-            return 0;
-        });
-    },
-
-    /* @method readFile
-     * Read and return an <a href="file.html">HxFile</a>'s contents
-     * @param {String} path Path to the file to read from
-     * @returns {String} file contents
-     */
-
-    readFile: function(path) {
-        var nodeName = this.basename(path);
-        var candidates = this.find(nodeName);
-
-        for (var i=0; i < candidates.length; i++) {
-            if (candidates[i].path == path) {
-                return candidates[i].file.read();
-            }
-        }
-
-        console.warn('file "' + path + '" not found');
-        return false;
-    },
-
-    /* @method writeFile
-     * @param {String} path File path to node to be written to
-     * @param {String} buf Contents to write to an HxFile
-     * @param {Bool} append Append to file if true
-     * @returns {Bool} true on success
-     */
-
-    writeFile: function(path, buf, append) {
-        var nodeName = this.basename(path);
-        var candidates = this.find(nodeName);
-
-        for (var i=0; i < candidates.length; i++) {
-            if (candidates[i].path == path) {
-                if (append) {
-                    candidates[i].file.append(buf);
-                } else {
-                    candidates[i].file.write(buf);
-
-                    try {
-                        // update system.bin if necessary
-                        if (path.match(/^\/bin\//)) {
-                            // FIXME: after saving updated command, running again causes exception SyntaxError: Unexpected token (
-                            var warning = 'saving to /bin not currently supported, but trying anyway...';
-                            system.wash.fd[1].write(warning);
-
-                            var binpath = 'system' + path.replace(/\//g, '.');
-                            var binobj = eval(binpath); // get the exectable object
-                            binobj.exec = eval(buf);    // evaluate text to create function object and assign it
-                        }
-                    } catch(e) {
-                        system.wash.fd[1].write("sorry, it didn't work");
-                    }
-                }
-                return true;
-            }
-        }
-
-        return false;
-    },
-
-    /* @method getFolder
-     * @param {String} path Absolute path to the desired folder
-     * @returns {HxJSFS} false if not found, otherwise an HxJSFS object (or subclass)
-     */
-
-    getFolder: function(path) {
-            if (path == '/') return system.fs;
-            path = path.replace(/\/$/, ''); // trim trailing slash if present
-
-            var folderObj,
-                fspath = 'system.fs', //FIXME: figure out path to 'this' for relatve paths
-                newpath = '',
-                pathParts = path.split('/');
-
-            // create string representation of the javascript object we're going to want
-            if (pathParts.length > 1) {
-                pathParts.shift();
-
-                for (var i=0; i<pathParts.length; i++) {
-                    if (pathParts[i].match(/-/)) { // deal with GUID names
-                        newpath += '.tree["' + pathParts[i] + '"]';
-
-                    } else {
-                        newpath += '.tree.' + pathParts[i]; // natural names
-                    }
-                }
-            }
-            fspath += newpath;
-
-            // try to access and return it if successful
-            try {
-                folderObj = eval(fspath);
-
-            } catch(e) {
-                console.warn('HxJSFS.getFolder: js exception: ' + e);
-                return false;
-            }
-
-            return folderObj ? folderObj : false;
-    },
-
-    /* @method mount
-     * Attach an HxJSFS (or subclass) tree to a node
-     * @param {String} path Path to mount the file system on
-     * @param {HxJSFS} fs The HxJSFS file system to mount
-     */
-
-    mount: function(path, fs) {
-        var subtreeName = this.basename(fs.name);
-        var folder = this.getFolder(path);
-        folder.tree[subtreeName] = fs;
-    },
-
-    /* @method addChildFolder
-     * Creates a named subfolder
-     * @param {String} name Name of subfolder
-     * @returns {Mixed} subfolder on success, false on failure
-     */
-
-    addChildFolder: function(name) {
-        this.tree[name] = new HxJSFS({});
-        return (this.tree[name] instanceof HxJSFS) ? this.tree[name] : false;
-    },
-
-    /* @method removeChildFolder
-     * Remove a named subfolder
-     * @param {String} name Name of subfolder to delete
-     * @returns {Bool} true on success
-     */
-
-    removeChildFolder: function(name) {
-        if (this.tree[name] && this.tree[name] instanceof HxJSFS) {
-            delete(this.tree[name]);
-            return (this.tree[name]) ? false : true;
-        }
-    },
-
-    /* @method addFile
-     * Create an empty HxFile
-     * @param {String} name Name of file to create
-     * @param {String} buf Initial contents of the file
-     * @returns {Mixed} file on success, false on failure
-     */
-
-    addFile: function(name, buf) {
-        buf = buf || '';
-        this.tree[name] = new HxFile({
-            name: name,
-            buffer: buf
-        });
-        return (this.tree[name] instanceof HxFile) ? this.tree[name] : false;
-    },
-
-    /* @method removeFile
-     * Delete a named file
-     * @param {String} name Name of file to delete
-     * @returns {Bool} true on success
-     */
-
-    removeFile: function(name) {
-        if (this.tree[name] && this.tree[name] instanceof HxFile) {
-            delete(this.tree[name]);
-            return (this.tree[name]) ? false : true;
-        }
-    }
-});
-/* procfs.js
- *
- * ++[black[Atomic OS Class: HxPROCFS]++
- *
- * JavaScript tree structure to represent processes in a filesystem
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxPROCFS = HxJSFS.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="jsfs.html">HxJSFS</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this.tree = opts.tree || {};
-        this._super(opts);
-    },
-
-    /* @method addChildFolder
-     * **Superclass Override**
-     * Creates a named subfolder
-     * @param {String} name Name of subfolder
-     * @returns {Mixed} Folder on success, false on failure
-     */
-
-    addChildFolder: function(name) {
-        this.tree[name] = new HxPROCFS({});
-        return (this.tree[name] instanceof HxPROCFS) ? this.tree[name] : false;
-    }
-});
-/* domfs.js
- *
- * ++[black[Atomic OS Class: HxDOMFS]++
- *
- * JavaScript tree structure to represent a filesystem in the DOM
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxDOMFS = HxJSFS.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="jsfs.html">HxJSFS</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this.tree = opts.tree || {};
-        this._super(opts);
-    },
-
-    /* @method addChildFolder
-     * **Superclass Override**
-     * Creates a named subfolder
-     * @param {String} name Name of subfolder
-     * @returns {Bool} True on success
-     */
-
-    addChildFolder: function(name) {
-        this.tree[name] = new HxDOMFS({});
-        return (this.tree[name] instanceof HxDOMFS);
-    },
-
-    /* @method addFile
-     * **Superclass Override**
-     * Create an empty HxFile
-     * @param {String} name Name of file to create
-     * @returns {Bool} True on success
-     */
-
-    addFile: function(name) {
-        $('#fileroot').append('<div class="domfile"></div>');
-        this.tree[name] = new HxFile({
-            name: name
-        });
-        return (this.tree[name] instanceof HxFile);
-    }
-});
-/* netfs.js
- *
- * ++[black[Atomic OS Class: HxNETFS]++
- *
- * JavaScript tree structure to represent a remote filesystem
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxNETFS = HxJSFS.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="jsfs.html">HxJSFS</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this.tree = opts.tree || {};
-        this._super(opts);
-    },
-
-    /* @method addChildFolder
-     * **Superclass Override**
-     * Creates a named subfolder
-     * @param {String} name Name of subfolder
-     * @returns {Bool} True on success
-     */
-
-    addChildFolder: function(name) {
-        this.tree[name] = new HxNETFS({});
-        return (this.tree[name] instanceof HxNETFS);
-    },
-
-    /* @method addFile
-     * **Superclass Override**
-     * Create an empty HxRemoteFile
-     * @param {String} name Name of file to create
-     * @returns {Bool} True on success
-     */
-
-    addFile: function(name) {
-        this.tree[name] = new HxRemoteFile({
-            name: name
-        });
-        return (this.tree[name] instanceof HxRemoteFile);
-    }
-});
-/* process.js
- *
- * ++[black[Atomic OS Class: HxProcess]++
- *
- * A simple object to represent a "process"
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxProcess = HxClass.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="class.html">HxClass</a>
-     *
-     * Creates three streams per process: STDIN, STDOUT, and STDERR
-     * @param {Object} opts Options dictionary
-     */
-    init: function(opts) {
-        opts = opts || {};
-        this.name = opts.name || HxGUID.next();
-
-        this._super(opts);
-
-        // default file descriptors; TODO: processes should push file references or temporary files here
-        this.fd = [
-            new HxStream({}),
-            new HxStream({}),
-            new HxStream({})
-        ];
-
-        system.lib.registerProcess(this);
-    }
-});
-
-/* wash.js
- *
- * ++[black[Atomic OS Class: HxWASH]++
- *
- * WASH (Web Application SHell)
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxWash = HxProcess.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="process.html">HxProcess</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        opts = opts || {};
-
-        this._super(opts);
-
-        var self   = this,
-            stdin  = this.fd[0].name,
-            stdout = this.fd[1].name,
-            stderr = this.fd[2].name;
-
-        this.fd[0].bus.subscribe(stdin  + ':ondata', this.onInput);
-        this.fd[1].bus.subscribe(stdout + ':ondata', this.onOutput);
-        this.fd[2].bus.subscribe(stderr + ':ondata', this.onError);
-    },
-
-    /* @method exec
-     * Executes a command
-     * @param {String} command The command line to execute
-     */
-
-    exec: function(command) {
-        var args = command.match(' ') ? command.split(' ') : command;
-
-        try {
-            var cmdName = args instanceof Array ? args.shift() : command
-                basename = system.fs.basename(cmdName),
-                cmdObj = null;
-
-            if (system.bin[basename]) {
-                cmdObj = eval( system.bin[basename] );
-
-            } else {
-                var notFound = 'command not found';
-
-                this.fd[1].write(notFound);
-                console.warn(notFound);
-            }
-
-            if (cmdObj) cmdObj.exec.call(this, args);
-
-        } catch(e) {
-            console.warn("WASH Exception:");
-            console.dir(e);
-        }
-    },
-
-    /* @method onInput
-     * Callback to execute when data is placed on STDIN
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onInput: function(args) {
-//        this.exec( this.fd[0].read() );
-
-        //FIXME: 'this' is an empty object
-        //
-        //       How do we set the scope to the wash instance
-        //       (We don't want to reference system.proc.wash...)
-
-        var buf = system.proc.wash.fd[0].read();
-        system.proc.wash.exec(buf);
-    },
-
-    /* @method onOutput
-     * Callback to execute when data is written to STDOUT
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onOutput: function(args) {
-        //FIXME: How do we set the scope to *this* wash instance
-        //       (...and want to route messages to linked processes)
-
-        var buf = system.proc.wash.fd[1].read();
-        console.log(buf);
-    },
-
-    /* @method onError
-     * Callback to execute when data is written to STDERR
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onError: function(args) {
-        //FIXME: How do we set the scope to *this* wash instance
-
-        var buf = system.proc.wash.fd[2].read();
-        console.warn(buf);
-    }
-});
-
-/* tcl.js
- *
- * ++[black[Atomic OS Class: HxTCL]++
- *
- * TCL Shell
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxTcl = HxProcess.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="process.html">HxProcess</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        opts = opts || {};
-
-        this._super(opts);
-
-        var self   = this,
-            stdin  = this.fd[0].name,
-            stdout = this.fd[1].name,
-            stderr = this.fd[2].name;
-
-        this.fd[0].bus.subscribe(stdin  + ':ondata', this.onInput);
-        this.fd[1].bus.subscribe(stdout + ':ondata', this.onOutput);
-        this.fd[2].bus.subscribe(stderr + ':ondata', this.onError);
-
-        this.interpreter = new TclInterp();
-    },
-
-    /* @method exec
-     * Executes a command
-     * @param {String} command The command line to execute
-     */
-
-    exec: function(command) {
-        var res;
-
-        try {
-            res = this.interpreter.eval(command);
-//            system.proc.wash.fd[1].write(res.content);
-
-        } catch(e) {
-            console.warn("TCL Exception:");
-            console.dir(e);
-        }
-
-        return res;
-    },
-
-    /* @method onInput
-     * Callback to execute when data is placed on STDIN
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onInput: function(args) {
-//        this.exec( this.fd[0].read() );
-
-        //FIXME: 'this' is an empty object
-        //
-        //       How do we set the scope to the tcl instance
-        //       (We don't want to reference system.proc.tcl...)
-
-        var buf = system.proc.tcl.fd[0].read();
-        system.proc.tcl.exec(buf);
-    },
-
-    /* @method onOutput
-     * Callback to execute when data is written to STDOUT
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onOutput: function(args) {
-        //FIXME: How do we set the scope to *this* tcl instance
-        //       (...and want to route messages to linked processes)
-
-        var buf = system.proc.tcl.fd[1].read();
-        console.log(buf);
-    },
-
-    /* @method onError
-     * Callback to execute when data is written to STDERR
-     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
-     */
-
-    onError: function(args) {
-        //FIXME: How do we set the scope to *this* tcl instance
-
-        var buf = system.proc.tcl.fd[2].read();
-        console.warn(buf);
-    }
-});
-
-/* panel.js
- *
- * ++[black[Atomic OS Class: HxPanel++]
- *
- * HxJSFS-based, mountable UI widget
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxPanel = HxJSFS.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="jsfs.html">HxJSFS</a>
-     *
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        this._super(opts);
-
-        this.toggleState = (opts && opts.toggled)  ? opts.toggled  : true;
-        this.name        = (opts && opts.name)     ? opts.name     : HxGUID.next();
-        this.parentEl    = (opts && opts.parentEl) ? opts.parentEl : 'winroot';
-        this.bus         = (opts && opts.bus)      ? opts.bus      : HxBus;
-        this.mountPoint  = (opts && opts.mount)    ? opts.mount    : null;
-
-        //FIXME: convert this nodes name to something the DOM can use
-        if (this.name.match(/\//)) {
-            this.name = system.fs.basename(this.name); 
-        }
-
-        var html = '<div id="' + this.name + '" class="ui-panel"></div>';
-
-//        console.warn('attaching panel ' + this.name + ' to ' + this.parentEl);
-
-        $('#' + this.parentEl).append(html);
-        this.hxpanel = $('#' + this.name);
-
-        if (opts && opts.className) { this.hxpanel.addClass(opts.className); }
-        if (opts && opts.css)   { this.hxpanel.css(opts.css); }
-
-        if (this.mountPoint) {
-            system.fs.mount(this.mountPoint, this);
-        }
-    },
-
-    /* @method get
-     * Get a Zepto object for this panels' DOM element
-     * @returns {Object} Returns the jQuery-compatible container for this panel
-     */
-
-    get: function() {
-        return this.hxpanel
-    },
-
-    /* @method getName
-     * Get the name for this panel
-     * @returns {String} DOM element ID
-     */
-
-    getName: function() {
-        return this.name;
-    },
-
-    /* @method moveTo
-     * Move this panel to a new location on the screen
-     * @param {Integer} x The left co-ordinate to position the panel at
-     * @param {Integer} y The top co-ordinate to position the panel at
-     */
-
-    moveTo: function(x,y) {
-        this.hxpanel.css({ top: y, left: x });
-    },
-
-    /* @method resizeTo
-     * Resize this panel (using CSS right/bottom rules, not width/height)
-     * @param {Integer} x2 The right co-oridinate for this panel
-     * @param {Integer} y2 The bottom co-ordinate for this panel
-     */
-
-    resizeTo: function(x2,y2) {
-        this.hxpanel.css({ right: x2, bottom: y2 });
-    },
-
-    /* @method toggle
-     * Show or hide this panel
-     * @returns {Bool} Returns the toggled state of this panel
-     */
-
-    toggle: function() {
-        toggleState = (toggleState) ? false : true;
-        this.hxpanel.fadeToggle();
-
-        return toggleState;
-    }
-});
-
-/* window.js
- *
- * ++[black[Atomic OS Class: HxWindow]++
- *
- * Mountable UI Window
- *
- * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
- * @version 2.0.0
- */
-
-var HxWindow = HxPanel.extend({
-    /* @constructor
-     * @method init
-     * Extends <a href="panel.html">HxPanel</a>
-     *
-     * When attaching to an HxProcess, be sure to connect handlers to your STD* streams
-     * @param {Object} opts Options dictionary
-     */
-
-    init: function(opts) {
-        opts = opts || {};
-
-        if (opts.defaultStyle) {
-            opts.css = opts.css || {};
-            opts.css.position = 'absolute';
-            opts.css.backgroundColor = '#ccc';
-            opts.css.border = '2px outset #eee';
-        }
-
-        this._super(opts);
-
-        this.title = opts.title || 'Window ' + this.name;
-
-        this.inputHandler  = opts.inputHandler  || function() {};
-        this.outputHandler = opts.outputHandler || function() {};
-        this.errorHandler  = opts.errorHandler  || function() {};
-
-        var ui = "<div id='" + this.name + "-titlebar' class='titlebar'>" + this.title + "</div><div id='" + this.name + "-content'></div>";
-
-        this.get().append(ui);
-    },
-
-    /* @method getTitlebar
-     * Get a Zepto object for the DOM element representing this windows' titlebar
-     * @returns {Object} Returns a jQuery-compatible container for the titlebar
-     */
-
-    getTitlebar: function() {
-        return $('#' + this.name + '-titlebar');
-    },
-
-    /* @method getContent
-     * Get a Zepto object for the DOM element representing this windows' main content area
-     * @returns {Object} Returns a jQuery-compatible container for the content area
-     */
-
-    getContent: function() {
-        return $('#' + this.name + '-content');
-    }
-});
-
-var HxCommandWindow = HxWindow.extend({
-    init: function(opts) {
-        opts = opts || {};
-        this._super(opts);
-
-        this.history = [];
-        this.historyPtr = this.history.length;
-
-// note: text inputs and textareas positioned with top,left,right,bottom work fine in webkit, but won't show correctly in Firefox
-//       (eg. per docs: <https://developer.mozilla.org/en/CSS/position>)
-//
-//       fixed by enclosing in div's, positioning those and then expanding the text inputs/areas using %-based widths/heights
-//       see <http://snook.ca/archives/html_and_css/absolute-position-textarea> for more info
-
-        var output = "<div id='" + this.name + "-h-output'><textarea id='" + this.name + "-output' class='rounded'>Welcome to WASH, the Web Application SHell\n</textarea></div>";
-
-        var input = "<span id='" + this.name + "-prompt'>" + system.env.cwd + " $ </span>" + 
-                    "<div id='" + this.name + "-h-input'><input id='" + this.name + "-input' type='text' /></div>" +
-                    "<button id='" + this.name + "-btn'>ENTER</button>";
-
-        var ui = output + input;
-        this.getContent().append(ui);
-
-        var self = this;
-
-        var hOutput = $('#' + this.name + '-h-output');
-        var txtOutput = $('#' + this.name + '-output');
-        hOutput.css({
-            display: 'block',
-            position: 'absolute',
-            top: '30px',
-            left: '2px',
-            right: '2px',
-            bottom: '32px'
-        });
-        txtOutput.css({
-            width: '99%',
-            height: '99%',
-            color: '#888',
-            fontFamily: 'Courier',
-            fontSize: '15px'
-        });
-
-        var promptLabel = $('#' + this.name + '-prompt');
-        promptLabel.css({
-            display: 'inline-block',
-            position: 'absolute',
-            bottom: '5px',
-            left: '0px',
-            width: '20%',
-            textAlign: 'right',
-            overflow: 'hidden',
-            backgroundColor: '#fff',
-            height: '20px',
-            border: '0px solid #000'
-        });
-        promptLabel.click(function() {
-            $('#' + self.name + '-input').focus();
-        });
-
-        var btnExecute = $('#' + this.name + '-btn');
-        btnExecute.css({
-            position: 'absolute',
-            bottom: '4px',
-            right: '10px'
-        }).addClass('ui-btn disabled');
-
-        btnExecute.click(function() {
-            self.exec.call(self);
-        });
-
-        var hInput = $('#' + this.name + '-h-input');
-        var txtInput = $('#' + this.name + '-input');
-        hInput.css({
-            position: 'absolute',
-            height: 20,
-            bottom: 5,
-            left: '20%',
-            right: 80,
-            margin: 0,
-            padding: 0
-        });
-        txtInput.css({
-            width: '99%',
-            height: 18,
-            outline: 'none',
-            border: '0px solid #000',
-            margin: '0px',
-            paddingLeft: '0.25em'
-        });
-
-        txtInput.keyup(function(evt) {
-            //if ($('#' + self.name + '-btn').hasClass('disabled')) {
-            //$('#' + self.name + '-btn').removeClass('disabled')
-            //$('#' + self.name + '-btn').addClass('disabled')
-
-            if (this.value.length > 0) {
-                $('#' + self.name + '-btn').removeClass('disabled')
-            } else {
-                $('#' + self.name + '-btn').addClass('disabled')
-            }
-
-            switch (evt.keyCode) {
-                case 13: // ENTER key
-                    $('#' + self.name + '-btn').trigger('click');
-                    break;
-
-                case 38: // UP key
-                    if (self.historyPtr > 0) self.historyPtr--;
-                    $('#' + self.name + '-input').val(self.history[self.historyPtr]);
-                    break;
-
-                case 40: // DOWN key
-                    var cmdString = '';
-
-                    if (self.historyPtr < self.history.length) {
-                        self.historyPtr++;
-                        cmdString = self.history[self.historyPtr];
-
-                    } else {
-                        cmdString = '';
-                    }
-
-                    $('#' + self.name + '-input').val(cmdString);
-                    break;
-
-                default:
-//                    console.log(evt.keyCode);
-            };
-        });
-
-        txtInput[0].focus();
-    },
-
-    exec: function(evt) {
-        var input = $('#' + this.name + '-input');
-        var cmdString = input.val();
-        input.val('');
-
-        this.history.push(cmdString);               // push onto command history
-        system.proc.wash.fd[1].write("\n" + system.env.cwd + "$ " + cmdString);  // echo to stdout
-        system.proc.wash.fd[0].write(cmdString);         // write to stdin so global wash will execute it
-
-        input[0].focus();
-        this.historyPtr = this.history.length;
-
-        var promptStr = system.env.cwd + ' $';
-        $('#' + this.name + '-prompt').html(promptStr);
-    },
-
-    cls: function() {
-        $('#' + this.name + '-output').val('');     //FIXME after clearing, all output stops... why?
-    }
-});
-
-var HxEditWindow = HxWindow.extend({
-    init: function(opts) {
-        opts = opts || {};
-        this._super(opts);
-
-        this.history = [];
-        this.historyPtr = this.history.length;
-
-// note: text inputs and textareas positioned with top,left,right,bottom work fine in webkit, but won't show correctly in Firefox
-//       (eg. per docs: <https://developer.mozilla.org/en/CSS/position>)
-//
-//       fixed by enclosing in div's, positioning those and then expanding the text inputs/areas using %-based widths/heights
-//       see <http://snook.ca/archives/html_and_css/absolute-position-textarea> for more info
-
-        var output = "<div id='" + this.name + "-h-editor'><textarea id='" + this.name + "-editor' class='rounded'></textarea></div>" +
-                     "<span id='" + this.name + "-status' class='statusbar rounded'></span>";
-
-        var input = "<span style='position: absolute; top: 37px; left: 215px; font-size: 14px; font-family: verdana;'>Filename:</span><div id='" + this.name + "-h-filename'><input id='" + this.name + "-filename' type='text' /></div>" +
-                    "<button id='" + this.name + "-btnnew'  class='ui-btn' style='position: absolute; top: 35px; left: 10px;'>NEW</button>" +
-                    "<button id='" + this.name + "-btnload' class='ui-btn disabled' style='position: absolute; top: 35px; left: 80px;'>LOAD</button>" + 
-                    "<button id='" + this.name + "-btnsave' class='ui-btn disabled' style='position: absolute; top: 35px; left: 150px;'>SAVE</button>";
-
-        var ui = output + input;
-        this.getContent().append(ui);
-
-        var self = this;
-
-        var hEditor = $('#' + this.name + '-h-editor').css({
-            position: 'absolute',
-            top: 65,
-            left: 2,
-            right: 0,
-            bottom: 32
-        });
-        var txtEditor = $('#' + this.name + '-editor').css({
-            width: '99%',
-            height: '99%'
-        });
-
-        var btnNew = $('#' + this.name + '-btnnew');
-        btnNew.click(function() {
-            $('#' + self.name + '-filename').val('');
-            $('#' + self.name + '-editor').val('');
-            $('#' + self.name + '-btnload').addClass('disabled');
-            $('#' + self.name + '-btnsave').addClass('disabled');
-            self.notify('File buffer cleared.');
-        });
-
-        var btnLoad = $('#' + this.name + '-btnload');
-        btnLoad.click(function() {
-            self.load();
-        });
-
-        var btnSave = $('#' + this.name + '-btnsave');
-        btnSave.click(function() {
-            self.save();
-        });
-
-        var hFilename = $('#' + this.name + '-h-filename');
-        hFilename.css({
-            position: 'absolute',
-            height: 20,
-            top: 35,
-            left: 290,
-            right: 5
-        });
-
-        var txtFilename = $('#' + this.name + '-filename');
-        txtFilename.css({
-            width: '99%'
-        }).addClass('rounded');
-
-        txtFilename.keyup(function(evt) {
-            if (this.value.length > 0) {
-                $('#' + self.name + '-btnload').removeClass('disabled');
-                $('#' + self.name + '-btnsave').removeClass('disabled');
-            } else {
-                $('#' + self.name + '-btnload').addClass('disabled');
-                $('#' + self.name + '-btnsave').addClass('disabled');
-            }
-
-            switch (evt.keyCode) {
-                case 13: // ENTER key
-                    if (! $('#' + self.name + '-btnsave').hasClass('disabled')) {
-                        $('#' + self.name + '-btnload').trigger('click');
-                        $('#' + self.name + '-editor').focus();
-                    }
-                    break;
-
-                case 38: // UP key
-                    if (self.historyPtr > 0) self.historyPtr--;
-                    $('#' + self.name + '-filename').val(self.history[self.historyPtr]);
-                    break;
-
-                case 40: // DOWN key
-                    var cmdString = '';
-
-                    if (self.historyPtr < self.history.length) {
-                        self.historyPtr++;
-                        cmdString = self.history[self.historyPtr];
-
-                    } else {
-                        cmdString = '';
-                    }
-
-                    $('#' + self.name + '-filename').val(cmdString);
-                    break;
-
-                default:
-//                    console.log(evt.keyCode);
-            };
-        });
-    },
-
-    load: function() {
-        var input = $('#' + this.name + '-filename');
-        var filename = input.val();
-
-        this.history.push(filename);
-        var buf = system.fs.readFile(filename);
-
-        if (buf) {
-            $('#' + this.name + '-editor').val(buf);
-            $('#' + this.name + '-btnsave').removeClass('disabled');
-            input[0].focus();
-            this.historyPtr = this.history.length;
-            this.notify('File "' + filename + '" loaded.');
-
-        } else {
-            this.notify('File "' + filename + '" not found.');
-        }
-
-
-    },
-
-    save: function() {
-        var input = $('#' + this.name + '-filename');
-        var filename = input.val();
-
-        var buf = $('#' + this.name + '-editor').val();
-        system.fs.writeFile(filename, buf);
-
-        var verify = system.fs.readFile(filename);
-        if (buf == verify) {
-            this.notify('File "' + filename + '" saved.');
-        }
-    },
-
-    cls: function() {
-        $('#' + this.name + '-editor').val('');
-    },
-
-    notify: function(msg) {
-        var statusbar = $('#' + this.name + '-status');
-        statusbar.html(msg);
-
-        setTimeout(function() {
-            statusbar.html('');
-        }, 2000);
-    }
-});
-
-var HxDocWindow = HxWindow.extend({
-    init: function(opts) {
-        opts = opts || {};
-        this._super(opts);
-
-        var ui = "<div id='" + this.name + "-h-iframe'><iframe id='" + this.name + "-iframe' class='rounded' src='scripts/docs/index.html'></iframe></div>";
-        this.getContent().append(ui);
-
-        var self = this;
-
-        var hIframe = $('#' + this.name + '-h-iframe').css({
-            position: 'absolute',
-            top: 35,
-            left: 15,
-            right: 0,
-            bottom: 15
-        });
-
-        var iFrame = $('#' + this.name + '-iframe').css({
-            width: '99%',
-            height: '99%'
-        });
-    }
-});
-
 /* cat.js
  *
  * Atomic OS WASH command
@@ -4114,6 +1248,1564 @@ system.bin.wallpaper = {
         }
     }
 };
+/* class.js
+ *
+ * ++[black[Atomic OS Class: HxClass]++
+ *
+ * Base class for Atomic OS objects
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxClass = Class.extend({
+    /* @constructor
+     * @method init
+     * @param {Object} opts Options dictionary
+     *
+     */
+    init: function(opts) {
+        opts = opts || {};
+    }
+});
+
+/* guid.js
+ *
+ * ++[black[Atomic OS Class: HxGUID] **Singleton**++
+ *
+ * Simple GUID generator based on http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+// FIXME: no validation
+window.HxGUID = (function() {
+    var S4 = function() {
+        return (((1+Math.random())*0x10000)|0).toString(16).substring(1);
+    };
+
+    return {
+        /* @method next
+         * Generates a GUID. **WARNING:** Does not check if ID already in use
+         * @returns {String} GUID
+         */
+
+        next: function() {
+            return (S4()+S4()+"-"+S4()+"-"+S4()+"-"+S4()+"-"+S4()+S4()+S4());
+        }
+    }
+})();
+/* bus.js
+ *
+ * ++[black[Atomic OS Class: HxBus] **Singleton**++
+ *
+ * Primary message bus
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxBus = (function () {
+    var channels = {
+        "default": {
+            subscriptions: {}
+        }
+    };
+
+    return {
+        /* @method publish
+         * Publish a message and execute all subscribed callback functions
+         * @param {String} msg Message being published
+         * @param {Array} args Arguments to pass to subscribed callbacks
+         * @param {Object} scope Context to execute callback with
+         * @param {String} ch Optional channel name !!default: 'default'!!
+         */
+
+        publish: function (msg, args, scope, ch) {
+            ch = (ch) ? ch : "default";
+
+            if (! channels.hasOwnProperty(ch)) {
+                console.warn('system bus: publish: "' + ch + '" is not a registered channel');
+                return;
+            }
+
+            if (! channels[ch].subscriptions.hasOwnProperty(msg)) {
+                console.warn('system bus: publish: "' + msg + '" is not a registered message');
+                return;
+            }
+
+            args = (args) ? args : [];
+
+            for (var i=0; i < channels[ch].subscriptions[msg].length; i++) {
+                if (scope) {
+                    channels[ch].subscriptions[msg][i].call(scope, args);
+                } else {
+                    channels[ch].subscriptions[msg][i](args);
+                }
+            }
+        },
+
+        /* @method subscribe
+         * Add a subscription
+         * @param {String} msg Message to subscribe to
+         * @param {Function} fn Function to callback when message is published
+         * @param {String} ch Optional channel name !!default: 'default'!!
+         */
+
+        subscribe: function (msg, fn, ch) {
+            if (typeof fn !== 'function') {
+                throw new Error('system bus: subscribe: fn must be a function');
+            }
+
+            ch = (ch) ? ch : "default";
+
+            if (! channels.hasOwnProperty(ch)) {
+                channels[ch] = {
+                    subscriptions: {}
+                };
+            };
+
+            if (! channels[ch].subscriptions[msg]) {
+                channels[ch].subscriptions[msg] = new Array();
+            }
+
+            channels[ch].subscriptions[msg].push(fn);
+        },
+
+        /* @method unsubscribe
+         * Remove a subscription
+         * @param {String} msg Subscribed message name
+         * @param {Function} fn The callback that was subscribed
+         * @param {String} ch Optional channel name !!default: 'default'!!
+         */
+
+        unsubscribe: function (msg, fn, ch) {
+            if (typeof fn !== 'function') {
+                throw new Error('system bus: unsubscribe: fn must be a function');
+            }
+
+            ch = (ch) ? ch : "default";
+
+            for (var i=0; i < channels[ch].subscriptions[msg].length; i++) {
+                if (channels[ch].subscriptions[msg][i] === fn) {
+                    channels[ch].subscriptions[msg].splice(i, 1);
+                    return;
+                }
+            }
+        }
+    }
+})();
+/* stream.js
+ *
+ * ++[black[Atomic OS Class: HxStream]++
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxStream = HxClass.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="class.html">HxClass</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        opts = opts                          || {};
+        this.name = opts.name                || HxGUID.next();
+        this.bus = opts.bus                  || HxBus;
+        this.buffer = opts.buffer            || '';
+        this.autoFlush = 'autoFlush' in opts ? opts.autoFlush : true;
+
+        var self = this;
+        this.bus.subscribe('rollcall', function() {
+            console.log('stream "' + self.name + '" responding');
+        });
+    },
+
+    /* @method read
+     * Read and return the internal buffer.  If this stream objects' autoFlush property is set to true, internal buffer will be flushed once read.
+     * @returns {String} Internal buffer
+     */
+
+    read: function() {
+        var buf = this.buffer;
+        if (this.autoFlush) this.flush();
+        return buf;
+    },
+
+    /* @method write
+     * Write characters to internal buffer, overwriting any previous contents
+     * @param {String} buf Text contents to store in internal buffer
+     * @returns {HxStream} Returns this stream object
+     */
+
+    write: function(buf) {
+        this.buffer = buf;
+        this.bus.publish(this.name + ':ondata', this.buffer.length);
+        return this;
+    },
+
+    /* @method append
+     * Write characters to internal buffer, appending to any previous contents
+     * @param {String} buf Text contents to append to internal buffer
+     * @returns {HxStream} Returns this stream object
+     */
+
+    append: function(buf) {
+        this.buffer += buf;
+        this.bus.publish(this.name + ':ondata', this.buffer.length);
+        return this;
+    },
+
+    /* @method flush
+     * Empties the internal buffer
+     */
+
+    flush: function() {
+        this.buffer = '';
+    }
+});
+/* file.js
+ *
+ * ++[black[Atomic OS Class: HxFile]++
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxFile = HxStream.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="stream.html">HxStream</a>
+     *
+     * By default, autoFlush is false for a file. Otherwise the contents would be lost after reading.
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this._super(opts);
+        this.autoFlush = false;
+    }
+});
+/* device.js
+ *
+ * ++[black[Atomic OS Class: HxDevice]++
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxDevice = HxStream.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="stream.html">HxStream</a>
+     *
+     * Represents an input and/or output device in an Atomic OS system
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this._super(opts);
+    }
+});
+/* remotefile.js
+ *
+ * ++[black[Atomic OS Class: HxRemoteFile]++
+ */
+
+var HxRemoteFile = HxFile.extend({
+	
+	/* @constructor
+     * @method init
+     * Extends <a href="file.html">HxFile</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+	
+    init: function(opts) {
+        this._super(opts);
+        this.dev = system.fs.tree.dev.tree.net;
+
+        this.read();
+
+        // if the buffer is empty after reading from the server then the file likely doesn't exist.  create it on the server
+        if (this.buffer == '') {
+            this.dev.send(
+                {
+                    cmd:    'file',
+                    subcmd: 'create',
+                    path:   this.name
+                },
+
+                function(response) {
+                    //FIXME: parsing the response is causing an unexpected token 'u' ??
+                    //       it doesn't prevent creation so ignoring for now
+
+                    //console.warn('>>' + response + '<<');
+                    try {
+                        var r = JSON.parse(r);
+                        console.log('HxRemoteFile.init: remote file creation response:');
+                        console.dir(r);
+ 
+                    } catch(e) {
+                        // console.log('HxRemoteFile.init: remote file creation: ERROR PARSING RESPONSE:');
+                        // console.dir(e);
+                    }
+                }
+            );
+        }
+    },
+
+	/* @method read
+     * **Superclass Override**
+     * Read the file through the net device and put it to the buffer.
+     * @returns {String} Internal buffer
+     *          {boolean} If read fails
+     */
+
+    read: function() {
+        path = this.name;
+        var self = this;
+
+        fileAction = {
+            cmd:    'file',
+            subcmd: 'read',
+            path:   path
+        };
+
+        this.dev.send(fileAction, function(response) {
+            var r = JSON.parse(response);
+
+            // fill buffer
+            self.buffer = r.data;
+        });
+
+        return this.buffer || false;
+    },
+	
+	 /* @method write
+     * Write characters to net device, overwriting any previous contents
+     * @param {String} buf Text contents to store in net divice
+     * @returns {HxStream} Returns this stream object
+     */
+
+    write: function(buf) {
+        this.buffer = buf;
+
+        var path = this.name;
+
+        fileAction = {
+            cmd:    'file',
+            subcmd: 'write',
+            path:   path,
+            buffer: buf
+        };
+       
+        this.dev.send(fileAction, function(response) {
+            var r = JSON.parse(response);
+            console.dir(r);
+        });
+
+        return this;
+    },
+   
+    /* @method append
+     * Write characters to net device, appending to any previous contents
+     * @param {String} buf Text contents to append to net divice
+     * @returns {HxStream} Returns this stream object
+     */
+   
+    append: function(buf) {
+        this.buffer += buf;
+
+        var path = this.name;
+       
+        fileAction = {
+            cmd:    'file',
+            subcmd: 'append',
+            path:   path,
+            buffer: buf
+        };
+       
+        this.dev.send(fileAction, function(response) {
+            var r = JSON.parse(response);
+            console.dir(r);
+        });
+
+        return this;
+    },
+    
+	/* @method deleteFile
+     * Delete file on net device
+     * 
+     * @returns {HxStream} Returns this stream object
+     */
+	
+    deleteFile: function() {
+        this.buffer = "";
+
+        var path = this.name;
+       
+        fileAction = {
+            cmd:    'file',
+            subcmd: 'delete',
+            path:   path
+        };
+       
+        this.dev.send(fileAction, function(response) {
+            var r = JSON.parse(response);
+            console.dir(r);
+        });
+
+        return this;
+    }
+});
+
+/* jsfs.js
+ *
+ * ++[black[Atomic OS Class: HxJSFS]++
+ *
+ * Tree structure to contain a temporary file system in JavaScript
+ *
+ * Derived from https://gist.github.com/897565
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+
+var HxJSFS = HxStream.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="stream.html">HxStream</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this.tree = opts.tree || {};
+        this._super(opts);
+    },
+
+    /* @method traverse
+     * Crawls a tree, executing a callback on each node found
+     * @param {Object} obj Object to crawl
+     * @param {Function} fn Function to call on each node
+     * @param {Object} parent Parent node
+     */
+
+    traverse: function(obj, fn, parent) {
+        for (i in obj) {
+            if (typeof(obj[i]) != 'function') fn.apply(this, [i, obj[i], parent]);
+
+            if (obj[i] instanceof HxJSFS) {
+                this.traverse(obj[i].tree, fn, i);
+            }
+        }
+    },
+
+    /* @method getNodeRecursive
+     * Search tree for the specified property name
+     * @param {String} property Property to search for
+     * @returns {Array} a list of objects, containing the matched node and it's parent
+     */
+
+    getNodeRecursive: function(property) {
+        var acc = [];
+
+        this.traverse(this.tree, function(key, value, parent) {
+            if (key === property) {
+                acc.push({ parent: parent, value: value });
+            }
+        });
+
+        return acc;
+    },
+
+    /* @method getPath
+     * Get the file path representation to a subnode
+     * @param {String} nodeName Name of the node to search for (eg. an <a href="file.html">HxFile</a>'s name)
+     * @returns {String} the file path to a subnode
+     */
+
+    getPath: function(nodeName) {
+        var path = '/' + nodeName;
+
+        var matches = this.getNodeRecursive(nodeName);
+
+        if (matches.length > 0) {
+            var parentNode = matches[0].parent;
+            if (parentNode) path = this.getPath(parentNode) + path;
+        }
+
+        return path;
+    },
+
+    /* @method find
+     * Locate a file in this file system
+     * @param {String} nodeName Name of the node to locate
+     * @returns {Array} a list of file paths containing the passed node name
+     */
+
+    find: function(nodeName) {
+        var acc = [];
+        var matches = this.getNodeRecursive(nodeName);
+
+        for (var m in matches) {
+            var parentNode = matches[m].parent;
+            var path = this.getPath(parentNode) + '/' + nodeName;
+            acc.push({ path: path, file: matches[m].value });
+        }
+
+        return acc;
+    },
+
+    /* @method basename
+     * @param {String} path File path to process
+     * @returns {String} the filename (endpoint of the file path)
+     */
+
+    basename: function(path) {
+        return (path.match(/\//)) ? path.split('/').pop() : path;
+    },
+
+    /* @method listFiles
+     * List all files and folders that are immediate children of this node
+     * @returns {Array} a sorted list of files and subtrees
+     */
+
+    listFiles: function() {
+        var acc = [];
+
+        for (var child in this.tree) {
+            var node = this.tree[child];
+            acc.push({ path: child, file: node });
+        }
+
+        return acc.sort(function(a, b) {
+            var path1 = a.path.toLowerCase(),
+                path2 = b.path.toLowerCase();
+
+            if (path1 < path2) return -1;
+            if (path1 > path2) return 1;
+            return 0;
+        });
+    },
+
+    /* @method readFile
+     * Read and return an <a href="file.html">HxFile</a>'s contents
+     * @param {String} path Path to the file to read from
+     * @returns {String} file contents
+     */
+
+    readFile: function(path) {
+        var nodeName = this.basename(path);
+        var candidates = this.find(nodeName);
+
+        for (var i=0; i < candidates.length; i++) {
+            if (candidates[i].path == path) {
+                return candidates[i].file.read();
+            }
+        }
+
+        console.warn('file "' + path + '" not found');
+        return false;
+    },
+
+    /* @method writeFile
+     * @param {String} path File path to node to be written to
+     * @param {String} buf Contents to write to an HxFile
+     * @param {Bool} append Append to file if true
+     * @returns {Bool} true on success
+     */
+
+    writeFile: function(path, buf, append) {
+        var nodeName = this.basename(path);
+        var candidates = this.find(nodeName);
+
+        for (var i=0; i < candidates.length; i++) {
+            if (candidates[i].path == path) {
+                if (append) {
+                    candidates[i].file.append(buf);
+                } else {
+                    candidates[i].file.write(buf);
+
+                    try {
+                        // update system.bin if necessary
+                        if (path.match(/^\/bin\//)) {
+                            // FIXME: after saving updated command, running again causes exception SyntaxError: Unexpected token (
+                            var warning = 'saving to /bin not currently supported, but trying anyway...';
+                            system.wash.fd[1].write(warning);
+
+                            var binpath = 'system' + path.replace(/\//g, '.');
+                            var binobj = eval(binpath); // get the exectable object
+                            binobj.exec = eval(buf);    // evaluate text to create function object and assign it
+                        }
+                    } catch(e) {
+                        system.wash.fd[1].write("sorry, it didn't work");
+                    }
+                }
+                return true;
+            }
+        }
+
+        return false;
+    },
+
+    /* @method getFolder
+     * @param {String} path Absolute path to the desired folder
+     * @returns {HxJSFS} false if not found, otherwise an HxJSFS object (or subclass)
+     */
+
+    getFolder: function(path) {
+            if (path == '/') return system.fs;
+            path = path.replace(/\/$/, ''); // trim trailing slash if present
+
+            var folderObj,
+                fspath = 'system.fs', //FIXME: figure out path to 'this' for relatve paths
+                newpath = '',
+                pathParts = path.split('/');
+
+            // create string representation of the javascript object we're going to want
+            if (pathParts.length > 1) {
+                pathParts.shift();
+
+                for (var i=0; i<pathParts.length; i++) {
+                    if (pathParts[i].match(/-/)) { // deal with GUID names
+                        newpath += '.tree["' + pathParts[i] + '"]';
+
+                    } else {
+                        newpath += '.tree.' + pathParts[i]; // natural names
+                    }
+                }
+            }
+            fspath += newpath;
+
+            // try to access and return it if successful
+            try {
+                folderObj = eval(fspath);
+
+            } catch(e) {
+                console.warn('HxJSFS.getFolder: js exception: ' + e);
+                return false;
+            }
+
+            return folderObj ? folderObj : false;
+    },
+
+    /* @method mount
+     * Attach an HxJSFS (or subclass) tree to a node
+     * @param {String} path Path to mount the file system on
+     * @param {HxJSFS} fs The HxJSFS file system to mount
+     */
+
+    mount: function(path, fs) {
+        var subtreeName = this.basename(fs.name);
+        var folder = this.getFolder(path);
+        folder.tree[subtreeName] = fs;
+    },
+
+    /* @method addChildFolder
+     * Creates a named subfolder
+     * @param {String} name Name of subfolder
+     * @returns {Mixed} subfolder on success, false on failure
+     */
+
+    addChildFolder: function(name) {
+        this.tree[name] = new HxJSFS({});
+        return (this.tree[name] instanceof HxJSFS) ? this.tree[name] : false;
+    },
+
+    /* @method removeChildFolder
+     * Remove a named subfolder
+     * @param {String} name Name of subfolder to delete
+     * @returns {Bool} true on success
+     */
+
+    removeChildFolder: function(name) {
+        if (this.tree[name] && this.tree[name] instanceof HxJSFS) {
+            delete(this.tree[name]);
+            return (this.tree[name]) ? false : true;
+        }
+    },
+
+    /* @method addFile
+     * Create an empty HxFile
+     * @param {String} name Name of file to create
+     * @param {String} buf Initial contents of the file
+     * @returns {Mixed} file on success, false on failure
+     */
+
+    addFile: function(name, buf) {
+        buf = buf || '';
+        this.tree[name] = new HxFile({
+            name: name,
+            buffer: buf
+        });
+        return (this.tree[name] instanceof HxFile) ? this.tree[name] : false;
+    },
+
+    /* @method removeFile
+     * Delete a named file
+     * @param {String} name Name of file to delete
+     * @returns {Bool} true on success
+     */
+
+    removeFile: function(name) {
+        if (this.tree[name] && this.tree[name] instanceof HxFile) {
+            delete(this.tree[name]);
+            return (this.tree[name]) ? false : true;
+        }
+    }
+});
+/* procfs.js
+ *
+ * ++[black[Atomic OS Class: HxPROCFS]++
+ *
+ * JavaScript tree structure to represent processes in a filesystem
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxPROCFS = HxJSFS.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="jsfs.html">HxJSFS</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this.tree = opts.tree || {};
+        this._super(opts);
+    },
+
+    /* @method addChildFolder
+     * **Superclass Override**
+     * Creates a named subfolder
+     * @param {String} name Name of subfolder
+     * @returns {Mixed} Folder on success, false on failure
+     */
+
+    addChildFolder: function(name) {
+        this.tree[name] = new HxPROCFS({});
+        return (this.tree[name] instanceof HxPROCFS) ? this.tree[name] : false;
+    }
+});
+/* domfs.js
+ *
+ * ++[black[Atomic OS Class: HxDOMFS]++
+ *
+ * JavaScript tree structure to represent a filesystem in the DOM
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxDOMFS = HxJSFS.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="jsfs.html">HxJSFS</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this.tree = opts.tree || {};
+        this._super(opts);
+    },
+
+    /* @method addChildFolder
+     * **Superclass Override**
+     * Creates a named subfolder
+     * @param {String} name Name of subfolder
+     * @returns {Bool} True on success
+     */
+
+    addChildFolder: function(name) {
+        this.tree[name] = new HxDOMFS({});
+        return (this.tree[name] instanceof HxDOMFS);
+    },
+
+    /* @method addFile
+     * **Superclass Override**
+     * Create an empty HxFile
+     * @param {String} name Name of file to create
+     * @returns {Bool} True on success
+     */
+
+    addFile: function(name) {
+        $('#fileroot').append('<div class="domfile"></div>');
+        this.tree[name] = new HxFile({
+            name: name
+        });
+        return (this.tree[name] instanceof HxFile);
+    }
+});
+/* netfs.js
+ *
+ * ++[black[Atomic OS Class: HxNETFS]++
+ *
+ * JavaScript tree structure to represent a remote filesystem
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxNETFS = HxJSFS.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="jsfs.html">HxJSFS</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this.tree = opts.tree || {};
+        this._super(opts);
+		this.dev = system.fs.tree.dev.tree.net;
+    },
+
+    /* @method addFile
+     * **Superclass Override**
+     * Create an empty HxRemoteFile
+     * @param {String} name Name of file to create
+     * @returns {Bool} True on success
+     */
+
+    addFile: function(name) {
+		//FIXME: cannot add file inside a folder.
+        this.tree[name] = new HxRemoteFile({
+            name: system.env.cwd + '/'+ name
+        });
+        return (this.tree[name] instanceof HxRemoteFile);
+    },
+   
+    /* @method removeFile
+     * **Superclass Override**
+     * Delete a named file
+     * @param {String} name Name of file to delete
+     * @returns {Bool} true on success
+     */
+
+    removeFile: function(name) {
+        if (this.tree[name] && this.tree[name] instanceof HxRemoteFile) {
+        	this.tree[name].deleteFile();
+        	delete(this.tree[name]);
+            return (this.tree[name]) ? false : true;
+        }
+    },
+	
+    /* @method addChildFolder
+     * **Superclass Override**
+     * Creates a named subfolder
+     * @param {String} name Name of subfolder
+     * @returns {HxNETFS} on success
+     *          null      when fail
+     */
+
+    addChildFolder: function(name) { 
+		// url = current path + / name
+		var path = system.env.cwd + '/'+ name;
+		
+		fileAction = {
+            cmd:    'folder',
+            subcmd: 'create',
+            path:   path
+        };
+
+		var r;
+        this.dev.send(fileAction, function(response) {
+            r = JSON.parse(response);
+        });
+		
+		if (r.data === "ok") {
+			this.tree[name] = new HxNETFS({});
+			return (this.tree[name] instanceof HxNETFS);
+		}else {
+			return null;
+		}
+    },
+	
+    /* @method removeChildFolder
+     * **Superclass Override**
+     * Remove a named folder
+     * @param {String} name Name of subfolder to delete
+     * @returns {Bool} true on success
+     */
+
+    removeChildFolder: function(name) {
+        if (this.tree[name] && this.tree[name] instanceof HxNETFS) {
+			// url = current path + / name
+			var path = system.env.cwd + '/' +name;
+			fileAction = {
+	            cmd:    'folder',
+	            subcmd: 'delete',
+	            path:   path
+        	};
+			
+			var r;
+            this.dev.send(fileAction, function(response){
+                r = JSON.parse(response);
+            });
+            
+            if (r.data === "ok") {
+                delete(this.tree[name]);	
+                return (this.tree[name]) ? false : true;
+            } else {
+                return false;
+            }           
+        }
+    }
+    
+});
+/* process.js
+ *
+ * ++[black[Atomic OS Class: HxProcess]++
+ *
+ * A simple object to represent a "process"
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxProcess = HxClass.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="class.html">HxClass</a>
+     *
+     * Creates three streams per process: STDIN, STDOUT, and STDERR
+     * @param {Object} opts Options dictionary
+     */
+    init: function(opts) {
+        opts = opts || {};
+        this.name = opts.name || HxGUID.next();
+
+        this._super(opts);
+
+        // default file descriptors; TODO: processes should push file references or temporary files here
+        this.fd = [
+            new HxStream({}),
+            new HxStream({}),
+            new HxStream({})
+        ];
+
+        system.lib.registerProcess(this);
+    }
+});
+
+/* wash.js
+ *
+ * ++[black[Atomic OS Class: HxWASH]++
+ *
+ * WASH (Web Application SHell)
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxWash = HxProcess.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="process.html">HxProcess</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        opts = opts || {};
+
+        this._super(opts);
+
+        var self   = this,
+            stdin  = this.fd[0].name,
+            stdout = this.fd[1].name,
+            stderr = this.fd[2].name;
+
+        this.fd[0].bus.subscribe(stdin  + ':ondata', this.onInput);
+        this.fd[1].bus.subscribe(stdout + ':ondata', this.onOutput);
+        this.fd[2].bus.subscribe(stderr + ':ondata', this.onError);
+    },
+
+    /* @method exec
+     * Executes a command
+     * @param {String} command The command line to execute
+     */
+
+    exec: function(command) {
+        var args = command.match(' ') ? command.split(' ') : command;
+
+        try {
+            var cmdName = args instanceof Array ? args.shift() : command
+                basename = system.fs.basename(cmdName),
+                cmdObj = null;
+
+            if (system.bin[basename]) {
+                cmdObj = eval( system.bin[basename] );
+
+            } else {
+                var notFound = 'command not found';
+
+                this.fd[1].write(notFound);
+                console.warn(notFound);
+            }
+
+            if (cmdObj) cmdObj.exec.call(this, args);
+
+        } catch(e) {
+            console.warn("WASH Exception:");
+            console.dir(e);
+        }
+    },
+
+    /* @method onInput
+     * Callback to execute when data is placed on STDIN
+     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
+     */
+
+    onInput: function(args) {
+//        this.exec( this.fd[0].read() );
+
+        //FIXME: 'this' is an empty object
+        //
+        //       How do we set the scope to the wash instance
+        //       (We don't want to reference system.proc.wash...)
+
+        var buf = system.proc.wash.fd[0].read();
+        system.proc.wash.exec(buf);
+    },
+
+    /* @method onOutput
+     * Callback to execute when data is written to STDOUT
+     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
+     */
+
+    onOutput: function(args) {
+        //FIXME: How do we set the scope to *this* wash instance
+        //       (...and want to route messages to linked processes)
+
+        var buf = system.proc.wash.fd[1].read();
+        console.log(buf);
+    },
+
+    /* @method onError
+     * Callback to execute when data is written to STDERR
+     * @param {Mixed} args Arguments passed by <a href="bus.html">HxBus</a>.publish()
+     */
+
+    onError: function(args) {
+        //FIXME: How do we set the scope to *this* wash instance
+
+        var buf = system.proc.wash.fd[2].read();
+        console.warn(buf);
+    }
+});
+
+/* panel.js
+ *
+ * ++[black[Atomic OS Class: HxPanel++]
+ *
+ * HxJSFS-based, mountable UI widget
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxPanel = HxJSFS.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="jsfs.html">HxJSFS</a>
+     *
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        this._super(opts);
+
+        this.toggleState = (opts && opts.toggled)  ? opts.toggled  : true;
+        this.name        = (opts && opts.name)     ? opts.name     : HxGUID.next();
+        this.parentEl    = (opts && opts.parentEl) ? opts.parentEl : 'winroot';
+        this.bus         = (opts && opts.bus)      ? opts.bus      : HxBus;
+        this.mountPoint  = (opts && opts.mount)    ? opts.mount    : null;
+
+        //FIXME: convert this nodes name to something the DOM can use
+        if (this.name.match(/\//)) {
+            this.name = system.fs.basename(this.name); 
+        }
+
+        var html = '<div id="' + this.name + '" class="ui-panel"></div>';
+
+//        console.warn('attaching panel ' + this.name + ' to ' + this.parentEl);
+
+        $('#' + this.parentEl).append(html);
+        this.hxpanel = $('#' + this.name);
+
+        if (opts && opts.className) { this.hxpanel.addClass(opts.className); }
+        if (opts && opts.css)   { this.hxpanel.css(opts.css); }
+
+        if (this.mountPoint) {
+            system.fs.mount(this.mountPoint, this);
+        }
+    },
+
+    /* @method get
+     * Get a Zepto object for this panels' DOM element
+     * @returns {Object} Returns the jQuery-compatible container for this panel
+     */
+
+    get: function() {
+        return this.hxpanel
+    },
+
+    /* @method getName
+     * Get the name for this panel
+     * @returns {String} DOM element ID
+     */
+
+    getName: function() {
+        return this.name;
+    },
+
+    /* @method moveTo
+     * Move this panel to a new location on the screen
+     * @param {Integer} x The left co-ordinate to position the panel at
+     * @param {Integer} y The top co-ordinate to position the panel at
+     */
+
+    moveTo: function(x,y) {
+        this.hxpanel.css({ top: y, left: x });
+    },
+
+    /* @method resizeTo
+     * Resize this panel (using CSS right/bottom rules, not width/height)
+     * @param {Integer} x2 The right co-oridinate for this panel
+     * @param {Integer} y2 The bottom co-ordinate for this panel
+     */
+
+    resizeTo: function(x2,y2) {
+        this.hxpanel.css({ right: x2, bottom: y2 });
+    },
+
+    /* @method toggle
+     * Show or hide this panel
+     * @returns {Bool} Returns the toggled state of this panel
+     */
+
+    toggle: function() {
+        toggleState = (toggleState) ? false : true;
+        this.hxpanel.fadeToggle();
+
+        return toggleState;
+    }
+});
+
+/* window.js
+ *
+ * ++[black[Atomic OS Class: HxWindow]++
+ *
+ * Mountable UI Window
+ *
+ * @author Scott Elcomb <psema4@gmail.com (http://www.psema4.com)
+ * @version 2.0.0
+ */
+
+var HxWindow = HxPanel.extend({
+    /* @constructor
+     * @method init
+     * Extends <a href="panel.html">HxPanel</a>
+     *
+     * When attaching to an HxProcess, be sure to connect handlers to your STD* streams
+     * @param {Object} opts Options dictionary
+     */
+
+    init: function(opts) {
+        opts = opts || {};
+
+        if (opts.defaultStyle) {
+            opts.css = opts.css || {};
+            opts.css.position = 'absolute';
+            opts.css.backgroundColor = '#ccc';
+            opts.css.border = '2px outset #eee';
+        }
+
+        this._super(opts);
+
+        this.title = opts.title || 'Window ' + this.name;
+
+        this.inputHandler  = opts.inputHandler  || function() {};
+        this.outputHandler = opts.outputHandler || function() {};
+        this.errorHandler  = opts.errorHandler  || function() {};
+
+        var ui = "<div id='" + this.name + "-titlebar' class='titlebar'>" + this.title + "</div><div id='" + this.name + "-content'></div>";
+
+        this.get().append(ui);
+    },
+
+    /* @method getTitlebar
+     * Get a Zepto object for the DOM element representing this windows' titlebar
+     * @returns {Object} Returns a jQuery-compatible container for the titlebar
+     */
+
+    getTitlebar: function() {
+        return $('#' + this.name + '-titlebar');
+    },
+
+    /* @method getContent
+     * Get a Zepto object for the DOM element representing this windows' main content area
+     * @returns {Object} Returns a jQuery-compatible container for the content area
+     */
+
+    getContent: function() {
+        return $('#' + this.name + '-content');
+    }
+});
+
+var HxCommandWindow = HxWindow.extend({
+    init: function(opts) {
+        opts = opts || {};
+        this._super(opts);
+
+        this.history = [];
+        this.historyPtr = this.history.length;
+
+// note: text inputs and textareas positioned with top,left,right,bottom work fine in webkit, but won't show correctly in Firefox
+//       (eg. per docs: <https://developer.mozilla.org/en/CSS/position>)
+//
+//       fixed by enclosing in div's, positioning those and then expanding the text inputs/areas using %-based widths/heights
+//       see <http://snook.ca/archives/html_and_css/absolute-position-textarea> for more info
+
+        var output = "<div id='" + this.name + "-h-output'><textarea id='" + this.name + "-output' class='rounded'>Welcome to WASH, the Web Application SHell\n</textarea></div>";
+
+        var input = "<span id='" + this.name + "-prompt'>" + system.env.cwd + " $ </span>" + 
+                    "<div id='" + this.name + "-h-input'><input id='" + this.name + "-input' type='text' /></div>" +
+                    "<button id='" + this.name + "-btn'>ENTER</button>";
+
+        var ui = output + input;
+        this.getContent().append(ui);
+
+        var self = this;
+
+        var hOutput = $('#' + this.name + '-h-output');
+        var txtOutput = $('#' + this.name + '-output');
+        hOutput.css({
+            display: 'block',
+            position: 'absolute',
+            top: '30px',
+            left: '2px',
+            right: '2px',
+            bottom: '32px'
+        });
+        txtOutput.css({
+            width: '99%',
+            height: '99%',
+            color: '#888',
+            fontFamily: 'Courier',
+            fontSize: '15px'
+        });
+
+        var promptLabel = $('#' + this.name + '-prompt');
+        promptLabel.css({
+            display: 'inline-block',
+            position: 'absolute',
+            bottom: '5px',
+            left: '0px',
+            width: '20%',
+            textAlign: 'right',
+            overflow: 'hidden',
+            backgroundColor: '#fff',
+            height: '20px',
+            border: '0px solid #000'
+        });
+        promptLabel.click(function() {
+            $('#' + self.name + '-input').focus();
+        });
+
+        var btnExecute = $('#' + this.name + '-btn');
+        btnExecute.css({
+            position: 'absolute',
+            bottom: '4px',
+            right: '10px'
+        }).addClass('ui-btn disabled');
+
+        btnExecute.click(function() {
+            self.exec.call(self);
+        });
+
+        var hInput = $('#' + this.name + '-h-input');
+        var txtInput = $('#' + this.name + '-input');
+        hInput.css({
+            position: 'absolute',
+            height: 20,
+            bottom: 5,
+            left: '20%',
+            right: 80,
+            margin: 0,
+            padding: 0
+        });
+        txtInput.css({
+            width: '99%',
+            height: 18,
+            outline: 'none',
+            border: '0px solid #000',
+            margin: '0px',
+            paddingLeft: '0.25em'
+        });
+
+        txtInput.keyup(function(evt) {
+            //if ($('#' + self.name + '-btn').hasClass('disabled')) {
+            //$('#' + self.name + '-btn').removeClass('disabled')
+            //$('#' + self.name + '-btn').addClass('disabled')
+
+            if (this.value.length > 0) {
+                $('#' + self.name + '-btn').removeClass('disabled')
+            } else {
+                $('#' + self.name + '-btn').addClass('disabled')
+            }
+
+            switch (evt.keyCode) {
+                case 13: // ENTER key
+                    $('#' + self.name + '-btn').trigger('click');
+                    break;
+
+                case 38: // UP key
+                    if (self.historyPtr > 0) self.historyPtr--;
+                    $('#' + self.name + '-input').val(self.history[self.historyPtr]);
+                    break;
+
+                case 40: // DOWN key
+                    var cmdString = '';
+
+                    if (self.historyPtr < self.history.length) {
+                        self.historyPtr++;
+                        cmdString = self.history[self.historyPtr];
+
+                    } else {
+                        cmdString = '';
+                    }
+
+                    $('#' + self.name + '-input').val(cmdString);
+                    break;
+
+                default:
+//                    console.log(evt.keyCode);
+            };
+        });
+
+        txtInput[0].focus();
+    },
+
+    exec: function(evt) {
+        var input = $('#' + this.name + '-input');
+        var cmdString = input.val();
+        input.val('');
+
+        this.history.push(cmdString);               // push onto command history
+        system.proc.wash.fd[1].write("\n" + system.env.cwd + "$ " + cmdString);  // echo to stdout
+        system.proc.wash.fd[0].write(cmdString);         // write to stdin so global wash will execute it
+
+        input[0].focus();
+        this.historyPtr = this.history.length;
+
+        var promptStr = system.env.cwd + ' $';
+        $('#' + this.name + '-prompt').html(promptStr);
+    },
+
+    cls: function() {
+        $('#' + this.name + '-output').val('');     //FIXME after clearing, all output stops... why?
+    }
+});
+
+var HxEditWindow = HxWindow.extend({
+    init: function(opts) {
+        opts = opts || {};
+        this._super(opts);
+
+        this.history = [];
+        this.historyPtr = this.history.length;
+
+// note: text inputs and textareas positioned with top,left,right,bottom work fine in webkit, but won't show correctly in Firefox
+//       (eg. per docs: <https://developer.mozilla.org/en/CSS/position>)
+//
+//       fixed by enclosing in div's, positioning those and then expanding the text inputs/areas using %-based widths/heights
+//       see <http://snook.ca/archives/html_and_css/absolute-position-textarea> for more info
+
+        var output = "<div id='" + this.name + "-h-editor'><textarea id='" + this.name + "-editor' class='rounded'></textarea></div>" +
+                     "<span id='" + this.name + "-status' class='statusbar rounded'></span>";
+
+        var input = "<span style='position: absolute; top: 37px; left: 215px; font-size: 14px; font-family: verdana;'>Filename:</span><div id='" + this.name + "-h-filename'><input id='" + this.name + "-filename' type='text' /></div>" +
+                    "<button id='" + this.name + "-btnnew'  class='ui-btn' style='position: absolute; top: 35px; left: 10px;'>NEW</button>" +
+                    "<button id='" + this.name + "-btnload' class='ui-btn disabled' style='position: absolute; top: 35px; left: 80px;'>LOAD</button>" + 
+                    "<button id='" + this.name + "-btnsave' class='ui-btn disabled' style='position: absolute; top: 35px; left: 150px;'>SAVE</button>";
+
+        var ui = output + input;
+        this.getContent().append(ui);
+
+        var self = this;
+
+        var hEditor = $('#' + this.name + '-h-editor').css({
+            position: 'absolute',
+            top: 65,
+            left: 2,
+            right: 0,
+            bottom: 32
+        });
+        var txtEditor = $('#' + this.name + '-editor').css({
+            width: '99%',
+            height: '99%'
+        });
+
+        var btnNew = $('#' + this.name + '-btnnew');
+        btnNew.click(function() {
+            $('#' + self.name + '-filename').val('');
+            $('#' + self.name + '-editor').val('');
+            $('#' + self.name + '-btnload').addClass('disabled');
+            $('#' + self.name + '-btnsave').addClass('disabled');
+            self.notify('File buffer cleared.');
+        });
+
+        var btnLoad = $('#' + this.name + '-btnload');
+        btnLoad.click(function() {
+            self.load();
+        });
+
+        var btnSave = $('#' + this.name + '-btnsave');
+        btnSave.click(function() {
+            self.save();
+        });
+
+        var hFilename = $('#' + this.name + '-h-filename');
+        hFilename.css({
+            position: 'absolute',
+            height: 20,
+            top: 35,
+            left: 290,
+            right: 5
+        });
+
+        var txtFilename = $('#' + this.name + '-filename');
+        txtFilename.css({
+            width: '99%'
+        }).addClass('rounded');
+
+        txtFilename.keyup(function(evt) {
+            if (this.value.length > 0) {
+                $('#' + self.name + '-btnload').removeClass('disabled');
+                $('#' + self.name + '-btnsave').removeClass('disabled');
+            } else {
+                $('#' + self.name + '-btnload').addClass('disabled');
+                $('#' + self.name + '-btnsave').addClass('disabled');
+            }
+
+            switch (evt.keyCode) {
+                case 13: // ENTER key
+                    if (! $('#' + self.name + '-btnsave').hasClass('disabled')) {
+                        $('#' + self.name + '-btnload').trigger('click');
+                        $('#' + self.name + '-editor').focus();
+                    }
+                    break;
+
+                case 38: // UP key
+                    if (self.historyPtr > 0) self.historyPtr--;
+                    $('#' + self.name + '-filename').val(self.history[self.historyPtr]);
+                    break;
+
+                case 40: // DOWN key
+                    var cmdString = '';
+
+                    if (self.historyPtr < self.history.length) {
+                        self.historyPtr++;
+                        cmdString = self.history[self.historyPtr];
+
+                    } else {
+                        cmdString = '';
+                    }
+
+                    $('#' + self.name + '-filename').val(cmdString);
+                    break;
+
+                default:
+//                    console.log(evt.keyCode);
+            };
+        });
+    },
+
+    load: function() {
+        var input = $('#' + this.name + '-filename');
+        var filename = input.val();
+
+        this.history.push(filename);
+        var buf = system.fs.readFile(filename);
+
+        if (buf) {
+            $('#' + this.name + '-editor').val(buf);
+            $('#' + this.name + '-btnsave').removeClass('disabled');
+            input[0].focus();
+            this.historyPtr = this.history.length;
+            this.notify('File "' + filename + '" loaded.');
+
+        } else {
+            this.notify('File "' + filename + '" not found.');
+        }
+
+
+    },
+
+    save: function() {
+        var input = $('#' + this.name + '-filename');
+        var filename = input.val();
+
+        var buf = $('#' + this.name + '-editor').val();
+        system.fs.writeFile(filename, buf);
+
+        var verify = system.fs.readFile(filename);
+        if (buf == verify) {
+            this.notify('File "' + filename + '" saved.');
+        }
+    },
+
+    cls: function() {
+        $('#' + this.name + '-editor').val('');
+    },
+
+    notify: function(msg) {
+        var statusbar = $('#' + this.name + '-status');
+        statusbar.html(msg);
+
+        setTimeout(function() {
+            statusbar.html('');
+        }, 2000);
+    }
+});
+
+var HxDocWindow = HxWindow.extend({
+    init: function(opts) {
+        opts = opts || {};
+        this._super(opts);
+
+        var ui = "<div id='" + this.name + "-h-iframe'><iframe id='" + this.name + "-iframe' class='rounded' src='scripts/docs/index.html'></iframe></div>";
+        this.getContent().append(ui);
+
+        var self = this;
+
+        var hIframe = $('#' + this.name + '-h-iframe').css({
+            position: 'absolute',
+            top: 35,
+            left: 15,
+            right: 0,
+            bottom: 15
+        });
+
+        var iFrame = $('#' + this.name + '-iframe').css({
+            width: '99%',
+            height: '99%'
+        });
+    }
+});
+
 /* dev/net.js
  *
  * ++[black[Atomic OS Class: Network Device]++
@@ -4248,7 +2940,7 @@ window.system = {
                     net: new HxNETDevice({
                         name: '/dev/net',
 //                        url: 'http://localhost/cgi-bin/aos-2/netdevice.cgi',
-                        url: 'net-example/netdevice.php',
+                        url: 'http://localhost/net-example/netdevice.php',
                         pollRate: 60000
                     })
                 }

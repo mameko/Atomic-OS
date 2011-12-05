@@ -73,6 +73,36 @@ switch ($cmd) {
         }
 
         break;
+        
+        case "folder":
+        $path = $_REQUEST['path'];
+        $path = preg_replace('/\.+/', '', $path);
+        $path = preg_replace('/`/',   '', $path);
+        $path = preg_replace('/;/',   '', $path);
+        $path = preg_replace('/^\//', '', $path);
+
+        $hosted_path = "$file_root/$path";
+        $hosted_size = filesize($hosted_path);
+
+        switch($subcmd) {        
+            case "create":
+                $result_text = 'fail';  
+                if(mkdir($hosted_path,0,true)){
+                	 $result_text = 'ok';
+                }
+                break;
+
+            case "delete":
+                $result_text = 'fail';
+                if (rmdir($hosted_path)){
+                	$result_text = 'ok';
+                }               
+                break;
+        }
+
+        break;
+        
+        
 }
 
 $result = array(
